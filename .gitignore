@@ -1,0 +1,28 @@
+# Python / 도구
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/
+
+# 모델, 녹음, 전사문, 요약은 커밋하지 않는다.
+# (모델은 repo 밖 ~/.cache/clinic-scribe/models 에 저장되지만, 실수로 복사한 경우까지 막는다.)
+*.bin
+*.bin.part
+*.wav
+*.aif
+*.aiff
+*.flac
+*.m4a
+*.mp3
+*.ogg
+recordings/
+exports/
+samples/
+*.transcript.*
+*.summary.*
+clinic-scribe-*.md
+clinic-scribe-*.json

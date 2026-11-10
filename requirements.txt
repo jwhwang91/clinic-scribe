@@ -1,0 +1,7 @@
+PySide6-Essentials>=6.7
+sounddevice>=0.4.6
+numpy>=1.26
+soundfile>=0.12
+soxr>=0.3.7
+# 마이크 권한 상태(허용/거부/미결정) 확인용. 없으면 무음 입력 감지로 대신한다.
+pyobjc-framework-AVFoundation>=10.0; sys_platform == "darwin"

@@ -1,0 +1,14 @@
+[project]
+name = "clinic-scribe"
+version = "0.1.0"
+description = "모의 진료 녹음 → whisper.cpp 로컬 전사 → Claude Code CLI 검토용 차트 초안"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "models: whisper.cpp 와 Whisper·VAD 모델이 필요한 통합 테스트",
+    "claude: Claude Code CLI 로 실제 요약을 요청하는 테스트 (CLINIC_SCRIBE_TEST_CLAUDE=1 일 때만 실행, 가상 전사문이 Claude 서비스로 전송됨)",
+    "gui: Qt 오프스크린 화면 테스트",
+]
