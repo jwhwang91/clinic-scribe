@@ -2,15 +2,21 @@
 
 장치가 지원하는 샘플레이트로 float32 녹음한다. 16 kHz 변환은 전사 직전에 한다.
 오디오 콜백은 블록을 큐에 넣기만 하고, 누적·레벨 계산은 UI 타이머가 한다.
+데모 입력 장치는 오디오 파일을 마이크처럼 실시간 속도로 흘려 보낸다(마이크 없이 대시보드 테스트).
 """
 
 from __future__ import annotations
 
+import bisect
 import queue
+import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
+import soundfile as sf
 
 
 class RecorderError(Exception):
@@ -24,10 +30,69 @@ class InputDevice:
     channels: int
     default_samplerate: int
     is_default: bool
+    demo_file: str | None = None  # 데모 입력: 이 파일을 마이크처럼 재생
+    demo_speed: float = 1.0
 
     def label(self) -> str:
+        if self.demo_file:
+            return f"데모 입력 · {Path(self.demo_file).name} (가상 대화를 마이크처럼 실시간 재생)"
         default = " (시스템 기본)" if self.is_default else ""
         return f"{self.name}{default} · {self.default_samplerate / 1000:g} kHz"
+
+
+def demo_device(path: Path, speed: float = 1.0) -> InputDevice:
+    info = sf.info(str(path))
+    return InputDevice(
+        index=-100, name=f"데모 입력 · {path.name}", channels=info.channels,
+        default_samplerate=int(info.samplerate), is_default=False, demo_file=str(path), demo_speed=speed,
+    )
+
+
+class FileInputStream:
+    """sounddevice.InputStream 처럼 동작하는 데모 입력. 파일을 실시간 속도로 콜백에 흘리고, 끝나면 무음을 보낸다."""
+
+    blocksize = 1024
+
+    def __init__(self, path: str, callback, speed: float = 1.0) -> None:
+        self.data, self.samplerate = sf.read(path, dtype="float32", always_2d=True)
+        self.channels = self.data.shape[1]
+        self.callback = callback
+        self.speed = max(0.1, speed)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def active(self) -> bool:
+        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="clinic-scribe-demo-input", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        started = time.monotonic()
+        position = sent = 0
+        silence = np.zeros((self.blocksize, self.channels), np.float32)
+        while not self._stop.is_set():
+            block = self.data[position : position + self.blocksize]
+            if len(block) < self.blocksize:
+                block = np.concatenate([block, silence[: self.blocksize - len(block)]])
+            self.callback(block, self.blocksize, None, None)
+            position += self.blocksize
+            sent += self.blocksize
+            delay = started + sent / (self.samplerate * self.speed) - time.monotonic()
+            if delay > 0:
+                self._stop.wait(delay)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    abort = stop
+
+    def close(self) -> None:
+        pass
 
 
 def list_input_devices(refresh: bool = False) -> list[InputDevice]:
@@ -68,9 +133,10 @@ def _default_input_index() -> int:
 
 class Recorder:
     def __init__(self) -> None:
-        self._stream: sd.InputStream | None = None
+        self._stream: sd.InputStream | FileInputStream | None = None
         self._queue: queue.Queue[np.ndarray] = queue.Queue()
         self._chunks: list[np.ndarray] = []
+        self._offsets: list[int] = []  # 각 블록의 시작 프레임 (snapshot 용)
         self._frames = 0
         self._peak = 0.0
         self.samplerate = 0
@@ -88,6 +154,15 @@ class Recorder:
     def start(self, device: InputDevice) -> None:
         if self._stream is not None:
             raise RecorderError("이미 녹음 중입니다.")
+        if device.demo_file:
+            self._reset_buffers()
+            try:
+                stream = FileInputStream(device.demo_file, self._callback, device.demo_speed)
+                stream.start()
+            except Exception as exc:
+                raise RecorderError(f"데모 입력 파일을 열지 못했습니다 ({device.demo_file}): {exc}") from exc
+            self._stream, self.samplerate, self.channels, self.device = stream, stream.samplerate, stream.channels, device
+            return
         channels = max(1, min(2, device.channels))
         samplerate = self._pick_samplerate(device, channels)
         self._reset_buffers()
@@ -128,11 +203,29 @@ class Recorder:
             except queue.Empty:
                 break
         for block in blocks:
+            self._offsets.append(self._frames)
             self._chunks.append(block)
             self._frames += len(block)
             if block.size:
                 self._peak = max(self._peak, float(np.max(np.abs(block))))
         return blocks
+
+    def snapshot(self, start_s: float, end_s: float) -> np.ndarray:
+        """지금까지 녹음된 소리 중 [start_s, end_s] 구간 (프레임, 채널). UI 스레드에서만 부른다."""
+        empty = np.zeros((0, max(1, self.channels)), np.float32)
+        if not self.samplerate or not self._chunks:
+            return empty
+        a = max(0, int(start_s * self.samplerate))
+        b = min(self._frames, int(end_s * self.samplerate))
+        if b <= a:
+            return empty
+        i = max(0, bisect.bisect_right(self._offsets, a) - 1)
+        parts = []
+        while i < len(self._chunks) and self._offsets[i] < b:
+            chunk, offset = self._chunks[i], self._offsets[i]
+            parts.append(chunk[max(0, a - offset) : max(0, b - offset)])
+            i += 1
+        return np.concatenate(parts) if parts else empty
 
     def stream_alive(self) -> bool:
         return self._stream is not None and bool(self._stream.active)
@@ -159,6 +252,7 @@ class Recorder:
         else:
             audio = np.zeros((0, max(1, self.channels)), dtype=np.float32)
         self._chunks = []
+        self._offsets = []
         return audio, self.samplerate
 
     def abort(self) -> None:
@@ -182,5 +276,6 @@ class Recorder:
             except queue.Empty:
                 break
         self._chunks = []
+        self._offsets = []
         self._frames = 0
         self._peak = 0.0

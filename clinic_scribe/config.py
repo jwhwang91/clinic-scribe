@@ -79,7 +79,7 @@ class Settings:
     claude_timeout_s: int = 300
     auto_summarize: bool = True
     show_evidence: bool = True
-    live_monitor: bool = False
+    live_preview: bool = True  # 녹음 중 실시간 전사 미리보기 (whisper.cpp, 이 Mac)
 
     # ---- 경로 해석 -------------------------------------------------------
     def whisper_model_path(self) -> Path:

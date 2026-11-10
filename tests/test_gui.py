@@ -116,6 +116,51 @@ def test_record_button_flow_with_fake_microphone(window, qapp, samples):
     assert "검토용 초안" in window.draft_view.toPlainText()
     window.copy_btn.click()
     assert qapp.clipboard().text().startswith("[검토용 초안]")
+    assert [window.pipeline.states[k] for k in ("record", "transcribe", "summary", "review")] == [
+        "done", "done", "done", "active",
+    ]
+
+
+def test_live_preview_shows_text_while_still_recording(window, qapp, samples):
+    """대시보드: 녹음 버튼을 누른 상태에서 말이 끊기면 그 부분이 실시간 전사 탭에 바로 나온다."""
+    FakeInputStream.source = source_audio(samples / "mock_consult_short.wav")
+    window.live_check.setChecked(True)
+    window.record_btn.click()
+    assert window.tabs.currentWidget() is window.live_view
+    assert window.pipeline.states["record"] == "active"
+    assert wait_until(qapp, lambda: any(e.status == "done" and "사흘" in e.text for e in window._live_entries), 30)
+    assert window.recorder.active  # 아직 녹음 중인데 전사가 먼저 보인다
+    assert "사흘" in window.live_view.toPlainText()
+    assert window.timeline.live and window.timeline.regions
+    window.record_btn.click()
+    assert wait_until(qapp, lambda: window.session.runs, 60)
+    assert window.pipeline.states["record"] == "done" and window.pipeline.states["transcribe"] == "done"
+    assert window.tabs.currentWidget() is window.transcript_view
+    assert not window.timeline.live and len(window.timeline.regions) == 2
+    assert "사흘" in window.live_view.toPlainText()  # 실시간 미리보기는 비교용으로 남는다
+
+
+def test_demo_input_device_runs_without_microphone(qapp, monkeypatch, samples):
+    from clinic_scribe.ui import main_window
+
+    monkeypatch.setattr(main_window, "list_input_devices", lambda refresh=False: [])
+    monkeypatch.setattr(mic_permission, "authorization_status", lambda: "denied")  # 마이크가 막혀 있어도 데모는 된다
+    s = Settings()
+    s.auto_summarize = False
+    w = main_window.MainWindow(s, demo_file=samples / "mock_consult_short.wav", demo_speed=8.0)
+    w.interactive = False
+    try:
+        assert w.device_combo.currentText().startswith("데모 입력")
+        assert w.record_btn.isEnabled()
+        w.record_btn.click()
+        assert w.recorder.active and "데모 입력" in w.status_badge.text()
+        assert wait_until(qapp, lambda: w.recorder.elapsed > 10.5, 10)
+        w.record_btn.click()
+        assert wait_until(qapp, lambda: w.session.runs, 60)
+        assert "사흘" in w.transcript_view.toPlainText()
+        assert w.session.source.startswith("데모 입력")
+    finally:
+        w.shutdown()
 
 
 def test_cancel_recording_releases_microphone(window, qapp):

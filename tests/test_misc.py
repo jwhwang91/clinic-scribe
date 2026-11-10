@@ -43,6 +43,20 @@ def test_live_monitor_marks_speech_start_and_silence_end():
     assert monitor.clips[1].end is None and monitor.in_speech
 
 
+def test_live_monitor_splits_long_continuous_speech():
+    rate = 16000
+    t = np.arange(rate * 25) / rate
+    speech = (0.2 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    monitor = LiveActivityMonitor(max_clip_s=10.0)
+    events = []
+    for i in range(0, len(speech), 512):
+        events += monitor.feed(speech[i : i + 512], rate)
+    # 쉬지 않고 25초를 말해도 10초마다 클립을 닫아 미리보기를 보낸다. 세션은 계속된다.
+    assert events == ["start", "split", "split"]
+    assert abs(monitor.clips[0].end - 10.0) < 0.1 and monitor.clips[1].start == monitor.clips[0].end
+    assert monitor.clips[2].end is None and monitor.in_speech
+
+
 def test_export_writes_markdown_and_optional_wav(tmp_path):
     session = Session(session_id=1, source="파일 · test.wav", pcm16=np.zeros(16000, np.int16))
     result = TranscriptionResult(
