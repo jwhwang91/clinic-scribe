@@ -19,6 +19,7 @@
 | 녹음 | 이 Mac (메모리) | 장치 샘플레이트로 녹음 → 전사 직전 16 kHz mono PCM WAV 로 변환 |
 | 실시간 전사 미리보기·신호 단어 감지 | 이 Mac (whisper.cpp) | 외부 전송 없음 |
 | 전사·음성 구간 | 이 Mac (whisper.cpp) | 외부 전송 없음. 임시 WAV 는 처리 직후 삭제 |
+| 말한 사람 표시 | 이 Mac (sherpa-onnx 화자 인식) | 외부 전송 없음. 등록한 의사 목소리 특징값만 `voices.json` 에 저장, 환자 목소리는 저장하지 않음 |
 | **요약** | **Claude 서비스 (Anthropic)** | **요약을 만들 때 그 진료의 전사문이 Claude Code CLI 를 통해 전송됩니다** |
 | 저장 | 사용자가 `내보내기…` 를 고른 경로만 | 자동 저장 없음. 앱을 닫으면 결과는 사라짐 |
 
@@ -44,8 +45,8 @@
 하는 일:
 
 1. `whisper-cli` 가 있으면 재사용하고, 없으면 `brew install whisper-cpp` (whisper.cpp 1.9.5, 의존성 ggml·llama.cpp·sdl2-compat 등이 함께 설치/갱신될 수 있음)
-2. repo 안 `.venv` 생성 후 `requirements.txt`, `requirements-dev.txt` 설치
-3. 모델 다운로드 (아래 표) — `.part` 로 받다가 **크기와 SHA-256 이 모두 맞을 때만** 최종 파일로 옮김
+2. repo 안 `.venv` 생성 후 `requirements.txt`, `requirements-dev.txt` 설치 (화자 인식 런타임 `sherpa-onnx` 포함)
+3. 모델 다운로드 (아래 표: Whisper, Silero VAD, 화자 인식) — `.part` 로 받다가 **크기와 SHA-256 이 모두 맞을 때만** 최종 파일로 옮김
    - 다시 실행하면 검증된 파일은 재사용하고, 끊긴 `.part` 는 이어받습니다. 손상된 부분 파일은 지우고 다시 받습니다.
 4. `claude` 실행 파일과 로그인 상태 확인 (전사문은 보내지 않음)
 5. 가상 음성(`say -v Yuna`)으로 whisper-cli + 모델 + VAD 자체 점검
@@ -160,14 +161,40 @@ macOS 는 마이크 권한을 **앱을 띄운 프로그램**에 줍니다. `pyth
 | --- | --- | --- |
 | Whisper 모델 | `~/.cache/clinic-scribe/models/ggml-large-v3-turbo-q5_0.bin` (574,041,195 bytes, SHA-256 `3942217…ffa7e2`) | https://huggingface.co/ggerganov/whisper.cpp |
 | Silero VAD 모델 | `~/.cache/clinic-scribe/models/ggml-silero-v6.2.0.bin` (885,098 bytes, SHA-256 `2aa269b…fb6987`) | https://huggingface.co/ggml-org/whisper-vad (whisper.cpp 1.9.5 의 `download-vad-model.sh` 가 받는 공식 변환본) |
+| 화자 인식 모델 | `~/.cache/clinic-scribe/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` (28,281,164 bytes, SHA-256 `aa3cfc1…0ceba2`) | https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models (배포의 `checksum.txt` 와 같은 값) |
 | whisper.cpp | `/opt/homebrew/bin/whisper-cli`, `whisper-vad-speech-segments` | Homebrew `whisper-cpp` |
 | 설정 | `~/Library/Application Support/clinic-scribe/settings.json` | 앱 `설정…` |
+| 등록한 의사 목소리 | `~/Library/Application Support/clinic-scribe/voices.json` (이 사용자만 읽기 권한) | 앱 `의사 목소리` |
 
 - 모델 폴더는 `CLINIC_SCRIBE_MODEL_DIR`, 설정 파일은 `CLINIC_SCRIBE_SETTINGS` 환경 변수로 바꿀 수 있습니다(설치 스크립트도 같은 변수를 따름).
 - `설정…` 에서 whisper-cli·모델·VAD 모델·`claude` 경로, Claude 모델 이름(기본 `claude-opus-5-5`), effort, 제한 시간, 요약 종류, 자동 요약 여부,
-  전사 힌트 프롬프트, 자동 진료 나누기(침묵 기준·신호 단어·최소 진료 길이·녹음 자동 멈춤)를 바꿀 수 있습니다. 비워 둔 경로는 자동으로 찾습니다.
+  전사 힌트 프롬프트, 자동 진료 나누기(침묵 기준·신호 단어·의사 목소리일 때만·최소 진료 길이·녹음 자동 멈춤),
+  말한 사람(화자 인식 모델 경로·같은 사람으로 볼 유사도)을 바꿀 수 있습니다. 설정 창은 탭으로 나뉘어 있습니다. 비워 둔 경로는 자동으로 찾습니다.
 - 전사 힌트 프롬프트 기본값은 약 이름 나열입니다(`CBC, CT, MRI, PPI, NSAIDs, omeprazole, acetaminophen, amoxicillin.`).
   “…진료 대화.” 같은 문장형 힌트는 일상 대화를 문장 구분 없이 한 줄로 뭉쳐서 바꿨습니다. 여기 넣은 약 이름일수록 영어 원문 표기로 남습니다.
+
+## 의사 목소리 등록 (말한 사람 표시)
+
+의사는 정해져 있고 환자는 매번 다르므로, **의사 목소리만 등록**해 두고 발화마다 등록한 목소리와 비교합니다.
+
+1. 위쪽 `의사 목소리` → 이름(예: 김원장)을 쓰고 **본인 동의 확인**에 표시합니다.
+2. 화면의 진료 문장을 평소 말투로 20~30초 읽고 `녹음 종료` → `등록`. 녹음해 둔 파일이 있으면 `파일에서…`.
+   실제 진료실에서, 진료 때 쓰는 마이크로 녹음하는 것이 가장 정확합니다.
+3. 이후 전사하는 진료부터 전사문의 발화마다 `김원장` 또는 `환자`가 붙고, 진료 기록에 `의사 김원장`이 표시됩니다.
+   요약할 때도 이 표시를 함께 보내 환자가 말한 증상과 의사가 말한 판단·계획을 구분하게 합니다(표시가 틀릴 수 있다는 점도 함께 알림).
+4. 의사를 등록하면 `들어오세요` 같은 신호 단어는 **등록한 의사 목소리일 때만** 진료를 나눕니다(설정 › 진료 나누기에서 끌 수 있음).
+
+| 항목 | 내용 |
+| --- | --- |
+| 방식 | 등록 음성을 4초 조각으로 나눠 목소리 특징값(192차원)을 평균 → 발화마다 특징값을 구해 코사인 유사도 비교 |
+| 기준 | 유사도 0.55 이상이면 그 의사, 아니면 `환자`(등록되지 않은 목소리 — 보호자일 수도 있음). 설정 › 말한 사람에서 조정 |
+| 판단하지 않는 발화 | 1초보다 짧은 말(`네`, `음`), 음성이 감지되지 않은 곳의 전사 |
+| 속도 | 15초 소리의 특징값 계산 약 0.05초 (M5 Pro). 전사가 끝난 뒤 같은 작업 안에서 붙임 |
+| 저장 | 의사 목소리 특징값만 `voices.json` 에 저장(파일 권한 600). 녹음 원본과 환자 목소리는 저장하지 않음. 등록 창에서 삭제 |
+
+- 목소리 특징값은 개인정보보호법상 **민감정보(생체인식정보)** 로 다뤄야 하므로 등록 전에 본인 동의를 받으세요.
+- 가상 음성으로만 검증했습니다(가상 진료의 의사 역할 0.82~0.94 / 환자 역할 0.14~0.48). 실제 사람 목소리로는 아직 확인하지 않았으니,
+  의사 말이 `환자`로 나오면 기준을 낮추고 반대면 높이세요.
 
 ## 음성 구간 자동 분리 (Silero VAD)
 
@@ -275,7 +302,9 @@ GUI 테스트는 마이크 대신 가짜 입력 스트림으로 녹음 버튼·�
 
 - macOS 전용입니다. 설치·실행 스크립트(Homebrew, bash), 마이크 권한 확인(AVFoundation), 외부 프로그램 종료 방식, 설정 파일 위치가
   macOS 기준이라 Windows 에서는 그대로 돌지 않습니다(화면·녹음·whisper.cpp·Claude CLI 자체는 Windows 에도 있음).
-- 화자 분리(diarization)를 하지 않습니다. 환자/의사 구분은 Claude 가 발화 내용으로 추정하며, 애매하면 `확인 필요` 에 남깁니다.
+- 말한 사람 표시는 **등록한 의사 목소리와 비교**하는 방식입니다. 의사를 등록하지 않으면 화자 표시가 없고, 한 줄에 두 사람 말이 섞이거나
+  겹쳐 말하면 더 많이 말한 쪽으로 붙습니다. 실제 사람 목소리로는 아직 검증하지 않았습니다.
+- 등록하지 않은 사람끼리(환자와 보호자 등)는 구분하지 않습니다(diarization 없음). 환자/의사 구분은 Claude 가 발화 내용으로 추정하며, 애매하면 `확인 필요` 에 남깁니다.
 - 자동 진료 나누기의 신호 단어는 실시간 전사(짧은 조각)에 의존하므로 잘못 들으면 놓치거나 잘못 나눌 수 있습니다. 확실한 경계는 스페이스바입니다.
 - 실시간 발화 감지는 소리 크기 기반이라 시끄러운 환경에서는 클립이 잘게 나뉘거나 늦게 닫힐 수 있습니다.
 - 진료 기록은 앱이 켜져 있는 동안만 메모리에 있습니다(최근 5개 진료만 녹음을 보관해 다시 전사·재생 가능). 필요한 결과는 `요약 복사` 또는 `내보내기…`.
@@ -294,13 +323,15 @@ clinic_scribe/
   live_monitor.py         녹음 중 발화 시작·무음 종료 감지 (클립 나누기)
   live_transcriber.py     녹음 중 클립 단위 실시간 전사 (미리보기·신호 단어 감지)
   auto_split.py           다음 환자 신호·끝인사 찾기
+  speakers.py             말한 사람 알아보기: 의사 목소리 등록·특징값·발화별 화자 표시 (sherpa-onnx)
   summarizer.py           Claude Code CLI 호출, 요약 지시·형식, 오류 분류
   conversation_summary.py 주요 내용 요약 구조·표시
   chart.py                진료 차트 초안 구조·표시·전사문 대조 자동 점검
   session.py              진료 하나의 녹음·전사·요약 묶음
   export.py               내보내기 (.md / .wav)
   procutil.py             외부 프로세스 실행·취소·종료 정리
-  ui/                     PySide6 화면 (simple_view = 간단 화면, main_window = 개발자 보기·전체 흐름, theme = 공통 어두운 디자인)
+  ui/                     PySide6 화면 (simple_view = 간단 화면, main_window = 개발자 보기·전체 흐름, theme = 공통 어두운 디자인,
+                          voice_dialog = 의사 목소리 등록)
 scripts/  setup_macos.sh · run.sh · make_test_audio.py · bench_ollama.py(실험)
 tests/    단위·통합·GUI 테스트 (가짜 claude 실행 파일, 가짜 마이크 입력 포함)
 ```

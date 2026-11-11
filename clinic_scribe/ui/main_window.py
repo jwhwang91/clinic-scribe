@@ -52,18 +52,20 @@ from clinic_scribe import mic_permission, procutil
 from clinic_scribe.audio import WHISPER_SR, AudioFileError, load_audio_file, pcm_slice, rms_dbfs, to_mono, to_whisper_pcm
 from clinic_scribe.auto_split import find_cue, parse_cues
 from clinic_scribe.chart import ChartDraft, verify_draft
-from clinic_scribe.config import DEFAULT_CLAUDE_MODEL, SUMMARY_MODES, Settings, VadParams
+from clinic_scribe.config import DEFAULT_CLAUDE_MODEL, SUMMARY_MODES, Settings, VadParams, voices_path
 from clinic_scribe.conversation_summary import ConversationSummary
 from clinic_scribe.export import export_session
 from clinic_scribe.live_monitor import LiveActivityMonitor
 from clinic_scribe.live_transcriber import LiveTranscriber
 from clinic_scribe.recorder import InputDevice, Recorder, RecorderError, demo_device, list_input_devices
 from clinic_scribe.session import Session, TranscriptRun
+from clinic_scribe.speakers import PATIENT, SpeakerEncoder, SpeakerError, VoiceBook, label_segments, main_doctor
 from clinic_scribe.summarizer import ClaudeConfig, SummaryError, summarize
 from clinic_scribe.ui import theme
 from clinic_scribe.ui.settings_dialog import SettingsDialog
 from clinic_scribe.ui.simple_view import HistoryRow, SimpleView
 from clinic_scribe.ui.tasks import Job, Task, TaskRunner
+from clinic_scribe.ui.voice_dialog import VoiceDialog
 from clinic_scribe.ui.widgets import BrandMark, LevelMeter, PipelineView, TimelineView, WaveformView
 from clinic_scribe.whisper import TranscriptionResult, WhisperConfig, WhisperError, WhisperRunner, format_time
 
@@ -148,6 +150,15 @@ class MainWindow(QMainWindow):
         self._status: tuple[str, str] = ("대기 중", "idle")  # 스페이스바 안내는 간단 화면에 따로 있다
         self._demo_device: InputDevice | None = None
         self._demo_error: str | None = None
+        # 등록한 의사 목소리 (말한 사람 표시용). 화자 인식 모델은 처음 쓸 때 연다.
+        self._voices_error: str | None = None
+        try:
+            self.voices = VoiceBook.load(voices_path())
+        except SpeakerError as exc:
+            self.voices = VoiceBook(voices_path())
+            self._voices_error = str(exc)
+        self._speaker_encoder_cache: SpeakerEncoder | None = None
+        self._speaker_issue: str | None = None
         if demo_file is not None:
             try:
                 self._demo_device = demo_device(demo_file, demo_speed)
@@ -166,6 +177,9 @@ class MainWindow(QMainWindow):
         self._load_devices(refresh=False)
         if self._demo_error:
             self._show_error(self._demo_error)
+        if self._voices_error:
+            self._show_error(self._voices_error, warn=True)
+        self._refresh_voices_button()
         self._refresh_mic_status()
         self._refresh_tool_status()
         self._refresh_auto_split_note()
@@ -213,6 +227,11 @@ class MainWindow(QMainWindow):
         self.mic_status_label = QLabel()
         self.mic_status_label.setObjectName("micStatus")
         device_row.addWidget(self.mic_status_label)
+        self.voices_btn = QPushButton("의사 목소리")
+        self.voices_btn.setObjectName("ghost")
+        self.voices_btn.setToolTip("의사 목소리를 등록하면 전사문의 발화마다 의사 이름이나 '환자'가 붙습니다.")
+        self.voices_btn.clicked.connect(self._open_voices)
+        device_row.addWidget(self.voices_btn)
         settings_btn = QPushButton("설정")
         settings_btn.setObjectName("ghost")
         settings_btn.clicked.connect(self._open_settings)
@@ -363,6 +382,7 @@ class MainWindow(QMainWindow):
         self.simple.retry_clicked.connect(self._on_summary_clicked)
         self.simple.copy_clicked.connect(self._on_copy)
         self.simple.settings_clicked.connect(self._open_settings)
+        self.simple.voices_clicked.connect(self._open_voices)
         self.simple.developer_clicked.connect(lambda: self._set_view("developer"))
         self.simple.history_selected.connect(self._on_history_selected)
 
@@ -676,6 +696,8 @@ class MainWindow(QMainWindow):
         self.record_btn.setStyleSheet(theme.record_button(recording))
         self.record_btn.setEnabled(not self._waiting_permission and (recording or bool(self._devices)))
         self.cancel_rec_btn.setEnabled(recording)
+        for button in (self.voices_btn, self.simple.voices_btn):
+            button.setEnabled(not recording)  # 목소리 등록은 진료 녹음 중이 아닐 때
         self.device_combo.setEnabled(not recording)
         self.refresh_devices_btn.setEnabled(not recording)
         self.open_btn.setEnabled(not recording and not self._waiting_permission)
@@ -714,7 +736,9 @@ class MainWindow(QMainWindow):
         else:
             when = start
         status = self._session_status(sess)
-        note = sess.end_reason if sess.end_reason and sess.end_reason != "직접 종료" else ""
+        doctor = main_doctor(sess.runs[-1].result.segments) if sess.runs else None
+        reason = sess.end_reason if sess.end_reason and sess.end_reason != "직접 종료" else ""
+        note = " · ".join(part for part in (f"의사 {doctor}" if doctor else "", reason) if part)
         return HistoryRow(sess.session_id, when, status, HISTORY_KINDS.get(status, "warn"), note)
 
     def _session_status(self, sess: Session) -> str:
@@ -1050,9 +1074,57 @@ class MainWindow(QMainWindow):
                 continue  # 이미 나뉜 앞 진료의 말
             if boundary - rec.offset_s < s.min_session_s:
                 continue  # 진료가 너무 짧다 (예: 새 진료 첫머리의 "들어오세요")
+            if not self._cue_from_doctor(seg):
+                continue  # 환자가 "들어오세요"를 따라 말한 경우 등
             label = "다음 환자 신호" if cue.kind == "next" else "끝인사"
             self._split_recording(boundary, f"{label} '{cue.phrase}'")
             return
+
+    def _cue_from_doctor(self, seg) -> bool:
+        """등록한 의사가 있고 '의사 목소리일 때만'이 켜져 있으면, 신호 단어를 말한 목소리가 등록한 의사인지 본다.
+
+        확인할 수 없으면(모델 없음, 너무 짧은 발화) 예전처럼 나눈다.
+        """
+        if not (self.settings.split_doctor_only and self.voices.voices):
+            return True
+        encoder = self._speaker_encoder_or_none()
+        if encoder is None:
+            return True
+        try:
+            clip = to_whisper_pcm(self.recorder.snapshot(seg.start, seg.end), self.recorder.samplerate)
+        except Exception:  # 앞부분이 이미 메모리에서 지워진 경우 등
+            return True
+        if len(clip) < WHISPER_SR // 2:
+            return True
+        name, _score = self.voices.identify(encoder.embed(clip), self.settings.speaker_threshold)
+        return name is not None
+
+    # ------------------------------------------------------------ 말한 사람 (화자)
+    def _speaker_encoder(self) -> SpeakerEncoder:
+        """화자 인식 모델 (처음 쓸 때 연다). 없으면 SpeakerError."""
+        if self._speaker_encoder_cache is None:
+            self._speaker_encoder_cache = SpeakerEncoder(self.settings.speaker_model_path())
+        return self._speaker_encoder_cache
+
+    def _speaker_encoder_or_none(self) -> SpeakerEncoder | None:
+        try:
+            return self._speaker_encoder()
+        except SpeakerError as exc:
+            self._speaker_issue = str(exc)
+            return None
+
+    def _refresh_voices_button(self) -> None:
+        count = len(self.voices.voices)
+        for button in (self.voices_btn, self.simple.voices_btn):
+            button.setText(f"의사 목소리 {count}" if count else "의사 목소리")
+
+    def _open_voices(self) -> None:
+        if self.recorder.active:
+            return
+        dialog = VoiceDialog(self.voices, self._speaker_encoder, self._selected_device(), self)
+        dialog.setStyleSheet(theme.stylesheet("VoiceDialog"))
+        dialog.exec()
+        self._refresh_voices_button()
 
     def _split_recording(self, boundary: float, reason: str) -> None:
         """녹음은 이어 가고, boundary 앞까지를 한 진료로 떼어 전사·요약한다."""
@@ -1333,6 +1405,10 @@ class MainWindow(QMainWindow):
         runner = self._whisper_runner()
         job = Job("transcribe", session.session_id, session.new_run_id(), auto_summary)
         pending = {"audio": source_audio}
+        # 등록한 의사가 있으면 전사 뒤에 발화마다 말한 사람을 붙인다 (모델이 없으면 건너뜀)
+        voices = self.voices.copy()
+        encoder = self._speaker_encoder_or_none() if voices.voices else None
+        threshold = self.settings.speaker_threshold
 
         def work(cancel) -> TranscriptionResult:
             if session.pcm16 is None:
@@ -1343,12 +1419,17 @@ class MainWindow(QMainWindow):
                     data, rate = pending.pop("audio")
                 session.pcm16 = to_whisper_pcm(data, rate)  # 원본 버퍼는 여기서 놓는다
                 del data
-            return runner.transcribe(session.pcm16, use_vad=use_vad, params=params, cancel=cancel)
+            result = runner.transcribe(session.pcm16, use_vad=use_vad, params=params, cancel=cancel)
+            if encoder is not None and result.segments:
+                result.segments = label_segments(result.segments, session.pcm16, encoder, voices, threshold, cancel)
+            return result
 
         session.transcribe_error = None
         self._tasks[(session.session_id, "transcribe")] = self.tasks.start(job, work)
         if session is self.session:
             self._clear_error()
+            if voices.voices and encoder is None:
+                self._show_error(f"말한 사람 표시를 건너뜁니다: {self._speaker_issue}", warn=True)
         self._refresh_controls()
 
     def _on_retranscribe(self) -> None:
@@ -1601,7 +1682,11 @@ class MainWindow(QMainWindow):
                     f'<p style="background:#3a2410;color:#fdba74;">{stamp} ⚠ 음성이 감지되지 않은 곳의 전사(환각 의심): {text}</p>'
                 )
             else:
-                rows.append(f'<p><span style="color:#8b93a1;font-family:Menlo;">{stamp}</span>&nbsp; {text}</p>')
+                who = ""
+                if seg.speaker:  # 등록한 의사 목소리와 비교한 결과 (틀릴 수 있음)
+                    color = "#fbbf24" if seg.speaker == PATIENT else "#a5b4fc"
+                    who = f'<span style="color:{color};font-weight:600;">{html.escape(seg.speaker)}</span>&nbsp; '
+                rows.append(f'<p><span style="color:#8b93a1;font-family:Menlo;">{stamp}</span>&nbsp; {who}{text}</p>')
         return "".join(rows)
 
     def _fill_regions(self, run: TranscriptRun | None) -> None:
@@ -1681,6 +1766,7 @@ class MainWindow(QMainWindow):
             self.settings.save()
             self._live_runner = None  # 바뀐 경로로 다시 만든다
             self._live_issue = None
+            self._speaker_encoder_cache = None
             self.summary_mode_combo.setCurrentIndex(max(0, self.summary_mode_combo.findData(self.settings.summary_mode)))
             self._refresh_tool_status()
             self._refresh_auto_split_note()

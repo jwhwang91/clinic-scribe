@@ -10,6 +10,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 REPO = Path(__file__).resolve().parent.parent
 SAMPLES = REPO / "samples"
+# 테스트가 쓰는 가상 음성. 하나라도 없으면 다시 만든다 (생성기에 새 음성을 추가했을 때).
+REQUIRED_SAMPLES = (
+    "manifest.json", "mock_consult_short.wav", "mock_consult.wav", "long_pause.wav", "injection.wav", "daily_chat.wav",
+    "two_patients.wav", "voice_enroll_doctor.wav", "voice_enroll_other.wav", "silence.wav", "quiet_room.wav",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -21,7 +26,7 @@ def _isolated_settings(tmp_path, monkeypatch):
 @pytest.fixture(scope="session")
 def samples() -> Path:
     """가상 진료 대화 음성. 없으면 scripts/make_test_audio.py 로 만든다 (macOS `say` 필요)."""
-    if not (SAMPLES / "manifest.json").is_file():
+    if any(not (SAMPLES / name).is_file() for name in REQUIRED_SAMPLES):
         subprocess.run([sys.executable, str(REPO / "scripts" / "make_test_audio.py"), str(SAMPLES)], check=True)
     return SAMPLES
 
@@ -36,6 +41,16 @@ def settings():
     from clinic_scribe.config import Settings
 
     return Settings()  # 기본값 (사용자 설정과 무관)
+
+
+@pytest.fixture(scope="session")
+def speaker_encoder(settings):
+    from clinic_scribe.speakers import SpeakerEncoder, SpeakerError
+
+    try:
+        return SpeakerEncoder(settings.speaker_model_path())
+    except SpeakerError as exc:
+        pytest.skip(f"화자 인식 모델이 없습니다 ({exc}). ./scripts/setup_macos.sh 를 먼저 실행하세요.")
 
 
 @pytest.fixture(scope="session")

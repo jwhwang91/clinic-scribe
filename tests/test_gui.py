@@ -9,7 +9,7 @@ import pytest
 import soxr
 
 from clinic_scribe import mic_permission, recorder
-from clinic_scribe.audio import load_audio_file, to_mono
+from clinic_scribe.audio import load_audio_file, to_mono, to_whisper_pcm
 from clinic_scribe.config import Settings
 from tests.helpers import make_fake_cli
 
@@ -490,6 +490,76 @@ def test_auto_split_on_next_patient_cue(window, qapp, samples):
     assert "사흘" in t1 and "목이" not in t1
     assert "목이" in t2 and "사흘" not in t2
     assert window.simple.history.count() == 2
+
+
+def enroll_voice(window, path, name, encoder):
+    """가상 음성 파일로 의사 목소리를 등록한다 (등록 창과 같은 계산)."""
+    from clinic_scribe.speakers import SAMPLE_RATE, enrollment_embeddings, speech_only
+
+    data, rate = load_audio_file(path)
+    speech = speech_only(to_whisper_pcm(data, rate))
+    window.voices.enroll(name, enrollment_embeddings(encoder, speech), len(speech) / SAMPLE_RATE)
+    window._speaker_encoder_cache = encoder
+    window._refresh_voices_button()
+
+
+def test_voice_dialog_enrolls_from_file_and_removes(window, qapp, samples, speaker_encoder):
+    from clinic_scribe.ui.voice_dialog import VoiceDialog
+
+    dialog = VoiceDialog(window.voices, lambda: speaker_encoder, None, window)
+    dialog.interactive = False
+    assert not dialog.record_btn.isEnabled() and not dialog.enroll_btn.isEnabled()  # 입력 장치·소리가 아직 없다
+    dialog.load_file(samples / "mock_consult_short.wav")
+    assert "초뿐" in dialog.message.text()  # 말소리가 10초보다 짧다
+    dialog.load_file(samples / "voice_enroll_doctor.wav")
+    dialog.name_edit.setText("김원장")
+    dialog.enroll_btn.click()
+    assert window.voices.names() == [] and "동의" in dialog.message.text()  # 동의 확인 전에는 등록하지 않는다
+    dialog.consent.setChecked(True)
+    dialog.enroll_btn.click()
+    assert window.voices.names() == ["김원장"] and window.voices.path.is_file() and dialog.changed
+    assert "김원장" in dialog.list.item(0).text()
+    dialog.list.setCurrentRow(0)
+    dialog.remove_btn.click()
+    assert window.voices.names() == []
+    dialog.reject()
+
+
+def test_transcript_marks_registered_doctor(window, qapp, samples, speaker_encoder):
+    from clinic_scribe.speakers import PATIENT
+
+    enroll_voice(window, samples / "voice_enroll_doctor.wav", "김원장", speaker_encoder)
+    assert window.simple.voices_btn.text() == "의사 목소리 1"
+    window.open_audio_file(samples / "mock_consult.wav", confirm=False)
+    assert wait_until(qapp, lambda: window.session is not None and window.session.runs and not window._tasks)
+    speakers = {seg.speaker for seg in window.session.runs[-1].result.segments}
+    assert {"김원장", PATIENT} <= speakers
+    assert "김원장" in window.transcript_view.toPlainText() and "환자" in window.transcript_view.toPlainText()
+    assert "의사 김원장" in window.simple.history.item(0).text()
+
+
+def test_cue_splits_only_when_registered_doctor_says_it(window, qapp, samples, speaker_encoder, monkeypatch):
+    """의사를 등록했으면 '들어오세요'를 말한 목소리가 등록한 의사일 때만 진료를 나눈다."""
+    window.settings.min_session_s = 5
+    checked = []
+    original = window._cue_from_doctor
+    monkeypatch.setattr(window, "_cue_from_doctor", lambda seg: checked.append(original(seg)) or checked[-1])
+
+    # 다른 사람만 등록: 대화 속 의사(등록 안 됨)의 '들어오세요'로는 나누지 않는다
+    enroll_voice(window, samples / "voice_enroll_other.wav", "박원장", speaker_encoder)
+    FakeInputStream.source = source_audio(samples / "two_patients.wav")
+    window.record_btn.click()
+    assert wait_until(qapp, lambda: window.recorder.elapsed > 19.5, 40)
+    assert checked and not any(checked) and len(window.sessions) == 1
+    window._on_cancel_recording()
+
+    # 대화 속 의사 목소리를 등록: 나눈다
+    checked.clear()
+    enroll_voice(window, samples / "voice_enroll_doctor.wav", "김원장", speaker_encoder)
+    window.record_btn.click()
+    assert wait_until(qapp, lambda: len(window.sessions) == 2, 40)
+    assert checked[-1] is True and "들어오세요" in window.sessions[0].end_reason
+    window._on_cancel_recording()
 
 
 def test_auto_split_on_long_silence(window, qapp, samples):

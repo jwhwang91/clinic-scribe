@@ -1,4 +1,4 @@
-"""설정 창: 실행 파일·모델 경로, Whisper 옵션, Claude CLI 옵션."""
+"""설정 창: 실행 파일·모델 경로, Whisper 옵션, Claude CLI 옵션, 진료 나누기, 말한 사람 표시."""
 
 from __future__ import annotations
 
@@ -14,7 +14,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
+    QWidget,
 )
 
 from clinic_scribe.config import (
@@ -108,20 +110,46 @@ class SettingsDialog(QDialog):
         sf.addRow("침묵 기준", self.split_silence)
         sf.addRow("다음 환자 신호", self.cues_next)
         sf.addRow("끝인사", self.cues_end)
+        self.split_doctor_only = QCheckBox("신호 단어는 등록한 의사 목소리일 때만 진료를 나누기 (의사 목소리를 등록했을 때)")
+        self.split_doctor_only.setChecked(s.split_doctor_only)
+        sf.addRow("", self.split_doctor_only)
         sf.addRow("최소 진료 길이", self.min_session)
         sf.addRow("녹음 자동 멈춤 (말 없음)", self.auto_stop)
 
+        speaker_box = QGroupBox("말한 사람 표시 (등록한 의사 목소리와 비교, 이 Mac 에서 처리)")
+        pf = QFormLayout(speaker_box)
+        self.speaker_model = PathField(s.speaker_model, str(s.speaker_model_path()), "화자 인식 모델 선택")
+        self.speaker_threshold = QDoubleSpinBox()
+        self.speaker_threshold.setRange(0.30, 0.90)
+        self.speaker_threshold.setSingleStep(0.05)
+        self.speaker_threshold.setValue(s.speaker_threshold)
+        self.speaker_threshold.setToolTip(
+            "등록한 목소리와 이 값 이상 비슷하면 그 의사로 봅니다.\n"
+            "의사 말이 '환자'로 나오면 낮추고, 환자 말이 의사로 나오면 높이세요."
+        )
+        pf.addRow("화자 인식 모델", self.speaker_model)
+        pf.addRow("같은 사람으로 볼 유사도", self.speaker_threshold)
+        speaker_note = QLabel("의사 목소리 등록·삭제는 위쪽 '의사 목소리' 버튼에서 합니다.")
+        speaker_note.setObjectName("subtle")
+        pf.addRow("", speaker_note)
+
         info = QLabel(f"설정 파일: {settings_path()}\n모델 기본 폴더: {default_model_dir()}")
-        info.setStyleSheet("color: gray;")
+        info.setObjectName("subtle")
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
+        # 항목이 많아 작은 화면에서도 잘리지 않게 탭으로 나눈다.
+        tabs = QTabWidget()
+        for box, title in ((whisper_box, "전사"), (claude_box, "요약"), (split_box, "진료 나누기"), (speaker_box, "말한 사람")):
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.addWidget(box)
+            page_layout.addStretch(1)
+            tabs.addTab(page, title)
         layout = QVBoxLayout(self)
-        layout.addWidget(whisper_box)
-        layout.addWidget(claude_box)
-        layout.addWidget(split_box)
+        layout.addWidget(tabs, 1)
         layout.addWidget(info)
         layout.addWidget(buttons)
 
@@ -145,3 +173,6 @@ class SettingsDialog(QDialog):
         s.split_cues_end = self.cues_end.text().strip()
         s.min_session_s = self.min_session.value()
         s.auto_stop_idle_s = self.auto_stop.value()
+        s.split_doctor_only = self.split_doctor_only.isChecked()
+        s.speaker_model = self.speaker_model.text()
+        s.speaker_threshold = round(self.speaker_threshold.value(), 2)

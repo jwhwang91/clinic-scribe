@@ -22,6 +22,7 @@ STATUS_COLORS = {
 
 # 안내 상자: (배경, 글자, 테두리)
 _CALLOUTS = {
+    "ok": ("#0f2219", "#86efac", "#1d4d33"),
     "note": ("#211d12", "#e9c46a", "#4a3c17"),
     "warn": ("#2a1a0e", "#fdba74", "#7c3a12"),
     "error": ("#2a1215", "#fca5a5", "#7f1d1d"),

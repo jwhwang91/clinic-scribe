@@ -60,6 +60,7 @@ class TranscriptSegment:
     last_region: int | None = None  # 여러 구간에 걸쳐 한 문장으로 전사된 경우 마지막 구간 번호
     speech_detected: bool = True  # False: VAD 가 음성을 찾지 못한 곳의 전사(환각 의심)
     uncertain_terms: list[str] = field(default_factory=list)  # 확률이 낮은 숫자·영문 단어
+    speaker: str | None = None  # 말한 사람: 등록한 의사 이름 / "환자"(등록되지 않은 목소리) / None(판단 안 함)
 
 
 @dataclass

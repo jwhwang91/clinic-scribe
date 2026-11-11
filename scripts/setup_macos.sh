@@ -24,6 +24,12 @@ VAD_URL="https://huggingface.co/ggml-org/whisper-vad/resolve/main/$VAD_MODEL"
 VAD_SHA256="2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987"
 VAD_SIZE=885098
 
+# 말한 사람 알아보기(화자 인식): sherpa-onnx 공식 배포의 3D-Speaker CAM++ (SHA-256 은 배포의 checksum.txt 와 같다)
+SPEAKER_MODEL="3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+SPEAKER_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/$SPEAKER_MODEL"
+SPEAKER_SHA256="aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2"
+SPEAKER_SIZE=28281164
+
 BLOCKED_STEPS=()
 BLOCKED_CMDS=()
 
@@ -191,12 +197,14 @@ if [ "$VENV_OK" = 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-section "3/5 Whisper / VAD 모델 ($MODEL_DIR)"
+section "3/5 Whisper / VAD / 화자 인식 모델 ($MODEL_DIR)"
 WHISPER_MODEL_OK=0
 VAD_MODEL_OK=0
+SPEAKER_MODEL_OK=0
 if mkdir -p "$MODEL_DIR"; then
     fetch_model "$WHISPER_MODEL" "$WHISPER_URL" "$WHISPER_SHA256" "$WHISPER_SIZE" && WHISPER_MODEL_OK=1
     fetch_model "$VAD_MODEL" "$VAD_URL" "$VAD_SHA256" "$VAD_SIZE" && VAD_MODEL_OK=1
+    fetch_model "$SPEAKER_MODEL" "$SPEAKER_URL" "$SPEAKER_SHA256" "$SPEAKER_SIZE" && SPEAKER_MODEL_OK=1
 else
     blocked "모델 폴더를 만들 수 없음" "mkdir -p \"$MODEL_DIR\" && ./scripts/setup_macos.sh"
 fi
@@ -247,6 +255,7 @@ section "결과"
 echo "  whisper-cli : ${WHISPER_CLI:-(없음)}"
 echo "  Whisper 모델: $MODEL_DIR/$WHISPER_MODEL $([ "$WHISPER_MODEL_OK" = 1 ] && echo '(검증됨)' || echo '(없음)')"
 echo "  VAD 모델    : $MODEL_DIR/$VAD_MODEL $([ "$VAD_MODEL_OK" = 1 ] && echo '(검증됨)' || echo '(없음)')"
+echo "  화자 모델   : $MODEL_DIR/$SPEAKER_MODEL $([ "$SPEAKER_MODEL_OK" = 1 ] && echo '(검증됨)' || echo '(없음 · 말한 사람 표시만 꺼짐)')"
 if [ "${#BLOCKED_STEPS[@]}" -eq 0 ]; then
     echo
     echo "설치 완료. 앱 실행: ./scripts/run.sh"

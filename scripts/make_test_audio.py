@@ -21,7 +21,7 @@ import soxr
 
 # 이 Mac 의 한국어 음성 중 파일 출력(say -o)이 되는 것은 Yuna 뿐이라 (Reed, Eddy 등은 무음 파일을 만든다)
 # 의사 역할은 같은 음성을 낮은 음높이로 바꿔 목소리를 구분한다.
-VOICES = {"patient": ("Yuna", 1.0), "doctor": ("Yuna", 0.84)}
+VOICES = {"patient": ("Yuna", 1.0), "doctor": ("Yuna", 0.84), "other": ("Daniel", 1.0)}
 WORK_SR = 48000
 
 # (화자, 대사, 이 대사 뒤 쉼 초)
@@ -65,6 +65,23 @@ TWO_PATIENTS = [
     ("doctor", "네, 다음 분 들어오세요.", 1.0),
     ("patient", "이틀 전부터 목이 아프고 기침이 나요.", 0.8),
     ("doctor", "목을 한번 볼게요.", 0.0),
+]
+
+# 의사 목소리 등록용 낭독 (등록 창의 읽기 문장과 같은 내용). 위 대화들의 의사 역할과 같은 목소리다.
+ENROLL_DOCTOR = [
+    ("doctor", "안녕하세요, 어디가 불편해서 오셨어요? 언제부터 그러셨는지 말씀해 주세요.", 0.6),
+    ("doctor", "식사하고 나서 더 심해지는지, 열이나 기침은 없는지도 알려 주세요.", 0.6),
+    ("doctor", "배를 한번 눌러 볼게요.", 0.6),
+    ("doctor", "오늘은 약을 드리고 경과를 보다가, 계속되면 검사를 해 보겠습니다.", 0.6),
+    ("doctor", "약은 하루 세 번 식후에 드시고, 일주일 뒤에 다시 오세요.", 0.0),
+]
+
+# 다른 사람(등록하지 않은 의사 역할)의 등록용 낭독: 이 목소리만 등록하면 위 대화의 의사는 '환자'로 나와야 한다
+ENROLL_OTHER = [
+    ("other", "Good morning. Please have a seat and tell me what brings you in today.", 0.6),
+    ("other", "How long have you had these symptoms, and do they get worse after meals?", 0.6),
+    ("other", "Let me listen to your chest and check your blood pressure.", 0.6),
+    ("other", "We will watch it for a few days and talk about tests if it continues.", 0.0),
 ]
 
 # 전사문 안에 지시문이 섞인 경우(프롬프트 주입) 확인용
@@ -143,6 +160,8 @@ def main() -> int:
             ("injection.wav", INJECTION, 48000, 1),
             ("daily_chat.wav", DAILY_CHAT, 48000, 1),
             ("two_patients.wav", TWO_PATIENTS, 48000, 1),
+            ("voice_enroll_doctor.wav", ENROLL_DOCTOR, 48000, 1),
+            ("voice_enroll_other.wav", ENROLL_OTHER, 44100, 1),
         ]
         for name, script, sr, ch in specs:
             audio, marks = compose(script, tmp, rng)

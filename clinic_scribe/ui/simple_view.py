@@ -271,6 +271,7 @@ class SimpleView(QWidget):
     retry_clicked = Signal()
     copy_clicked = Signal()
     settings_clicked = Signal()
+    voices_clicked = Signal()
     developer_clicked = Signal()
     history_selected = Signal(int)  # 진료 번호
 
@@ -336,12 +337,15 @@ class SimpleView(QWidget):
         self.mic_status = QLabel()
         self.mic_status.setObjectName("micStatus")
         row.addWidget(self.mic_status)
+        self.voices_btn = QPushButton("의사 목소리")
+        self.voices_btn.setToolTip("의사 목소리를 등록하면 전사문의 발화마다 의사 이름이나 '환자'가 붙습니다.")
+        self.voices_btn.clicked.connect(self.voices_clicked)
         self.settings_btn = QPushButton("설정")
         self.settings_btn.clicked.connect(self.settings_clicked)
         self.developer_btn = QPushButton("개발자 보기")
         self.developer_btn.setToolTip("전사문·음성 구간·VAD 비교·실시간 전사가 모두 보이는 개발자용 대시보드")
         self.developer_btn.clicked.connect(self.developer_clicked)
-        for button in (self.settings_btn, self.developer_btn):
+        for button in (self.voices_btn, self.settings_btn, self.developer_btn):
             button.setObjectName("ghost")
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             row.addWidget(button)

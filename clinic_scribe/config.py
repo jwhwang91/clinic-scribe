@@ -15,6 +15,8 @@ from pathlib import Path
 APP_NAME = "clinic-scribe"
 WHISPER_MODEL_FILE = "ggml-large-v3-turbo-q5_0.bin"
 VAD_MODEL_FILE = "ggml-silero-v6.2.0.bin"
+# 말한 사람 알아보기(화자 인식): 3D-Speaker CAM++ (중국어·영어 대규모 화자로 학습), sherpa-onnx 로 실행
+SPEAKER_MODEL_FILE = "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 CLAUDE_EFFORT_CHOICES = ("", "low", "medium", "high", "xhigh", "max")
 SUMMARY_MODES = {"general": "주요 내용 요약", "chart": "진료 차트 초안 (검토용)"}
@@ -44,6 +46,11 @@ def settings_path() -> Path:
     if env:
         return Path(env).expanduser()
     return Path.home() / "Library" / "Application Support" / APP_NAME / "settings.json"
+
+
+def voices_path() -> Path:
+    """등록한 의사 목소리 특징값(생체인식정보) 파일. 설정 파일과 같은 폴더, 이 Mac 에만 둔다."""
+    return settings_path().parent / "voices.json"
 
 
 @dataclass
@@ -94,6 +101,10 @@ class Settings:
     split_cues_end: str = "안녕히 가세요, 안녕히 가십시오, 조심히 가세요, 조심해서 가세요, 다음에 뵙겠습니다"  # 끝인사: 이 말까지
     min_session_s: int = 20  # 이보다 짧은 진료는 신호 단어로 나누지 않는다 (오인식으로 잘게 쪼개지는 것 방지)
     auto_stop_idle_s: int = 600  # 이만큼 말이 없으면 녹음 자체를 멈춰 마이크를 놓는다 (0 = 끄기)
+    # 말한 사람 알아보기: 등록한 의사 목소리와 비교한다 (등록한 의사가 있을 때만 동작)
+    speaker_model: str = ""
+    speaker_threshold: float = 0.55  # 등록 목소리와의 유사도가 이 이상이면 그 의사로 본다
+    split_doctor_only: bool = True  # 신호 단어는 등록한 의사 목소리일 때만 진료를 나눈다
 
     # ---- 경로 해석 -------------------------------------------------------
     def whisper_model_path(self) -> Path:
@@ -101,6 +112,9 @@ class Settings:
 
     def vad_model_path(self) -> Path:
         return Path(self.vad_model).expanduser() if self.vad_model else default_model_dir() / VAD_MODEL_FILE
+
+    def speaker_model_path(self) -> Path:
+        return Path(self.speaker_model).expanduser() if self.speaker_model else default_model_dir() / SPEAKER_MODEL_FILE
 
     def whisper_cli_path(self) -> str | None:
         return find_executable(
