@@ -17,12 +17,17 @@ WHISPER_MODEL_FILE = "ggml-large-v3-turbo-q5_0.bin"
 VAD_MODEL_FILE = "ggml-silero-v6.2.0.bin"
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 CLAUDE_EFFORT_CHOICES = ("", "low", "medium", "high", "xhigh", "max")
+SUMMARY_MODES = {"general": "주요 내용 요약", "chart": "진료 차트 초안 (검토용)"}
+VIEW_MODES = ("simple", "developer")
 
 # Whisper 초기 프롬프트. 영어 약명·약어를 한글로 음역하지 않고 원문 표기로 남기도록 유도한다.
 # 프롬프트에 들어 있는 단어일수록 원문 표기로 나온다. 자주 쓰는 약명을 설정에서 추가하면 된다.
 # (프롬프트 없이: "에서테미너펀 500mg", 이 프롬프트로: "acetaminophen 500mg", "CBC", "MRI")
-DEFAULT_WHISPER_PROMPT = (
-    "CBC, CT, MRI 검사와 PPI, NSAIDs, omeprazole, acetaminophen, amoxicillin 처방이 나오는 한국어 진료 대화."
+# 단어만 나열한다. "…진료 대화." 같은 문장형 프롬프트는 일상 대화를 문장 구분 없이 한 줄로 뭉쳐 버렸다.
+DEFAULT_WHISPER_PROMPT = "CBC, CT, MRI, PPI, NSAIDs, omeprazole, acetaminophen, amoxicillin."
+# 이전 기본값. 저장된 설정에 그대로 남아 있으면 새 기본값으로 바꾼다(사용자가 고친 프롬프트는 유지).
+LEGACY_WHISPER_PROMPTS = (
+    "CBC, CT, MRI 검사와 PPI, NSAIDs, omeprazole, acetaminophen, amoxicillin 처방이 나오는 한국어 진료 대화.",
 )
 
 
@@ -78,8 +83,17 @@ class Settings:
     claude_effort: str = ""
     claude_timeout_s: int = 300
     auto_summarize: bool = True
+    summary_mode: str = "general"  # "general" 주요 내용 요약 / "chart" 진료 차트 초안
+    view_mode: str = "simple"  # "simple" 간단 화면 / "developer" 개발자 대시보드
     show_evidence: bool = True
     live_preview: bool = True  # 녹음 중 실시간 전사 미리보기 (whisper.cpp, 이 Mac)
+    # 자동 진료 나누기: 스페이스바로 끝내는 것을 깜빡했을 때의 대비책. 녹음은 이어지고 앞 진료만 따로 요약한다.
+    auto_split: bool = True
+    split_silence_s: int = 90  # 이만큼 말이 없으면 진료가 끝난 것으로 본다
+    split_cues_next: str = "들어오세요, 들어오실게요, 다음 환자, 다음 분 오세요"  # 다음 환자 신호: 이 말부터 새 진료
+    split_cues_end: str = "안녕히 가세요, 안녕히 가십시오, 조심히 가세요, 조심해서 가세요, 다음에 뵙겠습니다"  # 끝인사: 이 말까지
+    min_session_s: int = 20  # 이보다 짧은 진료는 신호 단어로 나누지 않는다 (오인식으로 잘게 쪼개지는 것 방지)
+    auto_stop_idle_s: int = 600  # 이만큼 말이 없으면 녹음 자체를 멈춰 마이크를 놓는다 (0 = 끄기)
 
     # ---- 경로 해석 -------------------------------------------------------
     def whisper_model_path(self) -> Path:
@@ -124,6 +138,12 @@ class Settings:
         if isinstance(raw.get("vad"), dict):
             vad_known = {f.name for f in fields(VadParams)}
             settings.vad = VadParams(**{k: v for k, v in raw["vad"].items() if k in vad_known})
+        if settings.whisper_prompt in LEGACY_WHISPER_PROMPTS:
+            settings.whisper_prompt = DEFAULT_WHISPER_PROMPT
+        if settings.summary_mode not in SUMMARY_MODES:
+            settings.summary_mode = "general"
+        if settings.view_mode not in VIEW_MODES:
+            settings.view_mode = "simple"
         return settings
 
     def save(self, path: Path | None = None) -> None:

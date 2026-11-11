@@ -23,6 +23,12 @@ def test_from_structured_and_text_has_review_banner_and_sections():
     assert "근거:" not in draft.to_text(include_evidence=False)
 
 
+def test_empty_chart_explains_non_clinical_conversation():
+    empty = {"chief_complaint_hpi": [], "exam_findings": [], "assessment_plan": [], "needs_review": []}
+    assert "진료 관련 내용을 찾지 못했습니다" in ChartDraft.from_structured(empty).to_html()
+    assert "진료 관련 내용을 찾지 못했습니다" not in ChartDraft.from_structured(CHART).to_html()
+
+
 @pytest.mark.parametrize(
     "bad",
     [None, [], {"chief_complaint_hpi": []}, {**CHART, "exam_findings": "없음"}, {**CHART, "needs_review": [{"text": ""}]}],

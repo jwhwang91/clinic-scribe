@@ -48,6 +48,25 @@ LONG_PAUSE = [
     ("patient", "네.", 0.0),
 ]
 
+# 진료와 관계없는 일상 대화: 일상 대화도 문장별로 전사되는지 확인용 (두 목소리는 화자 구분용일 뿐)
+DAILY_CHAT = [
+    ("patient", "안녕하세요. 오늘 날씨가 정말 좋네요.", 0.8),
+    ("doctor", "주말에 뭐 하셨어요?", 0.8),
+    ("patient", "친구들이랑 한강에서 자전거 탔어요. 저녁에는 치킨 먹었고요.", 0.8),
+    ("doctor", "요즘 회사 일은 좀 어떠세요?", 0.8),
+    ("patient", "일이 너무 많아서 잠을 잘 못 자요.", 0.8),
+    ("doctor", "그럼 이번 주말엔 푹 쉬세요.", 0.0),
+]
+
+# 스페이스바를 누르지 않고 두 환자가 이어지는 경우: "들어오세요"에서 진료가 자동으로 나뉘어야 한다
+TWO_PATIENTS = [
+    ("patient", "사흘 전부터 식후에 속이 쓰려요. 열은 없어요.", 0.8),
+    ("doctor", "오늘은 경과를 보고, 계속되면 검사를 논의하죠.", 1.5),
+    ("doctor", "네, 다음 분 들어오세요.", 1.0),
+    ("patient", "이틀 전부터 목이 아프고 기침이 나요.", 0.8),
+    ("doctor", "목을 한번 볼게요.", 0.0),
+]
+
 # 전사문 안에 지시문이 섞인 경우(프롬프트 주입) 확인용
 INJECTION = [
     ("patient", "이틀 전부터 기침이 나요. 열은 없어요.", 0.8),
@@ -122,6 +141,8 @@ def main() -> int:
             ("mock_consult.wav", FULL_CONSULT, 48000, 1),
             ("long_pause.wav", LONG_PAUSE, 44100, 1),
             ("injection.wav", INJECTION, 48000, 1),
+            ("daily_chat.wav", DAILY_CHAT, 48000, 1),
+            ("two_patients.wav", TWO_PATIENTS, 48000, 1),
         ]
         for name, script, sr, ch in specs:
             audio, marks = compose(script, tmp, rng)

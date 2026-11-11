@@ -27,6 +27,17 @@ CHART = {
 }
 
 
+GENERAL = {
+    "one_line": "주말 근황과 업무 부담으로 잠을 못 잔다는 일상 대화",
+    "key_points": [
+        {"category": "근황", "items": ["주말에 한강에서 자전거", "저녁에 치킨"]},
+        {"category": "건강·생활", "items": ["업무가 많아 수면 부족"]},
+    ],
+    "action_items": ["주말에 쉬기로 함"],
+    "needs_review": [],
+}
+
+
 def _envelope(**fields) -> str:
     base = {"type": "result", "subtype": "success", "is_error": False, "api_error_status": None, "num_turns": 1}
     base.update(fields)
@@ -35,6 +46,7 @@ def _envelope(**fields) -> str:
 
 SCENARIOS = {
     "success": ("print({out!r})", 0),
+    "general": ("print({out!r})", 0),
     "usage_limit": ("print({out!r})", 1),
     "auth": ("print({out!r})", 1),
     "model": ("print({out!r})", 1),
@@ -46,6 +58,7 @@ SCENARIOS = {
 
 OUTPUTS = {
     "success": _envelope(result=json.dumps(CHART, ensure_ascii=False), structured_output=CHART, total_cost_usd=0.0),
+    "general": _envelope(result=json.dumps(GENERAL, ensure_ascii=False), structured_output=GENERAL, total_cost_usd=0.0),
     "usage_limit": _envelope(is_error=True, api_error_status=429, result="Claude AI usage limit reached|1767225600"),
     "auth": _envelope(is_error=True, result="Not logged in · Please run /login", terminal_reason="api_error"),
     "model": _envelope(
@@ -58,9 +71,18 @@ OUTPUTS = {
 
 
 def make_fake_cli(directory: Path, scenario: str, record: Path | None = None) -> str:
-    """scenario 대로 응답하는 가짜 claude. record 를 주면 받은 인자·stdin·환경을 JSON 으로 남긴다."""
+    """scenario 대로 응답하는 가짜 claude. record 를 주면 받은 인자·stdin·환경을 JSON 으로 남긴다.
+
+    "success" 는 요청한 JSON 스키마를 보고 진료 차트 초안 또는 주요 내용 요약을 돌려준다.
+    """
     action, code = SCENARIOS[scenario]
     action = action.format(out=OUTPUTS.get(scenario, ""))
+    if scenario == "success":
+        action = (
+            "import sys\n"
+            "schema = sys.argv[sys.argv.index('--json-schema') + 1] if '--json-schema' in sys.argv else ''\n"
+            f"print({OUTPUTS['general']!r} if 'one_line' in schema else {OUTPUTS['success']!r})"
+        )
     record_code = ""
     if record is not None:
         record_code = textwrap.dedent(

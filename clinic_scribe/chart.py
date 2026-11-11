@@ -39,6 +39,7 @@ class ChartDraft:
     model: str = ""
     based_on: str = ""
     created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
+    kind_label = "차트 초안"
 
     @classmethod
     def from_structured(cls, data: object, **meta) -> ChartDraft:
@@ -89,6 +90,11 @@ class ChartDraft:
             '<div style="background:#fff4e5;border:1px solid #f0b46a;padding:6px 8px;color:#7a4100;">'
             f"<b>{e(REVIEW_BANNER)}</b></div>"
         ]
+        if not any(self.sections.get(key) for key in CLINICAL_KEYS):
+            parts.append(
+                '<p style="color:#1d4ed8;">대화에서 진료 관련 내용을 찾지 못했습니다. 차트에는 증상·진찰·평가·계획만 정리하므로 '
+                "일상 대화는 비어 보이는 것이 정상입니다. 말한 내용 전체는 왼쪽 '전사문' 탭에서 확인하세요.</p>"
+            )
         for key, title in SECTIONS:
             parts.append(f'<h3 style="margin:12px 0 4px 0;">{e(title)}</h3><ul style="margin-top:0;">')
             items = self.sections.get(key, [])

@@ -20,6 +20,16 @@ def test_settings_roundtrip_ignores_unknown_keys(tmp_path):
     assert loaded.claude_model == "claude-sonnet-x" and loaded.vad.min_silence_ms == 900
 
 
+def test_old_default_prompt_is_migrated_but_custom_prompt_is_kept(tmp_path):
+    from clinic_scribe.config import DEFAULT_WHISPER_PROMPT, LEGACY_WHISPER_PROMPTS
+
+    path = tmp_path / "settings.json"
+    Settings(whisper_prompt=LEGACY_WHISPER_PROMPTS[0]).save(path)
+    assert Settings.load(path).whisper_prompt == DEFAULT_WHISPER_PROMPT
+    Settings(whisper_prompt="tamsulosin, finasteride.").save(path)
+    assert Settings.load(path).whisper_prompt == "tamsulosin, finasteride."
+
+
 def test_settings_load_broken_file_gives_defaults(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text("{oops", encoding="utf-8")

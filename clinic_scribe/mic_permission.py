@@ -47,12 +47,28 @@ def request_access(callback: Callable[[bool], None]) -> bool:
     try:
         from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
 
-        AVCaptureDevice.requestAccessForMediaType_completionHandler_(
-            AVMediaTypeAudio, lambda granted: callback(bool(granted))
-        )
+        AVCaptureDevice.requestAccessForMediaType_completionHandler_(AVMediaTypeAudio, completion_handler(callback))
         return True
     except Exception:
         return False
+
+
+def completion_handler(callback: Callable[[bool], object]) -> Callable[[bool], None]:
+    """AVFoundation 완료 블록(void 반환)용 감싸개.
+
+    PyObjC 는 블록 함수가 None 이 아닌 값을 돌려주거나 예외를 내면 Objective-C 예외로 바꾸는데,
+    이 블록은 TCC 의 백그라운드 스레드에서 불리므로 그 예외가 앱 전체를 중단시킨다(SIGABRT).
+    Qt Signal.emit 처럼 값을 돌려주는 함수를 그대로 넘기면 권한 대화상자에 답하는 순간 앱이 꺼진다.
+    """
+
+    def handler(granted) -> None:
+        try:
+            callback(bool(granted))
+        except Exception:
+            pass
+        return None
+
+    return handler
 
 
 def host_app_name() -> str:

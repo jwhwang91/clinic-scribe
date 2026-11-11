@@ -210,6 +210,16 @@ class Recorder:
                 self._peak = max(self._peak, float(np.max(np.abs(block))))
         return blocks
 
+    def discard_before(self, seconds: float) -> None:
+        """이미 넘겨준 앞부분 블록을 메모리에서 지운다. 시각(프레임 위치)은 녹음 시작 기준 그대로 유지된다."""
+        if not self.samplerate:
+            return
+        frame = int(seconds * self.samplerate)
+        keep = max(0, bisect.bisect_right(self._offsets, frame) - 1)
+        if keep:
+            del self._chunks[:keep]
+            del self._offsets[:keep]
+
     def snapshot(self, start_s: float, end_s: float) -> np.ndarray:
         """지금까지 녹음된 소리 중 [start_s, end_s] 구간 (프레임, 채널). UI 스레드에서만 부른다."""
         empty = np.zeros((0, max(1, self.channels)), np.float32)
@@ -238,8 +248,11 @@ class Recorder:
         """
         return self.samplerate > 0 and self._frames > 1.5 * self.samplerate and self._peak == 0.0
 
-    def stop(self) -> tuple[np.ndarray, int]:
-        """녹음을 끝내고 마이크를 놓는다. (프레임 수, 채널) float32 와 샘플레이트를 돌려준다."""
+    def stop(self, keep_audio: bool = True) -> tuple[np.ndarray, int]:
+        """녹음을 끝내고 마이크를 놓는다. (프레임 수, 채널) float32 와 샘플레이트를 돌려준다.
+
+        keep_audio=False 면 남은 소리를 이어 붙이지 않는다(이미 snapshot 으로 가져간 경우).
+        """
         stream, self._stream = self._stream, None
         if stream is not None:
             try:
@@ -247,7 +260,7 @@ class Recorder:
             finally:
                 stream.close()
         self.drain()
-        if self._chunks:
+        if self._chunks and keep_audio:
             audio = np.concatenate(self._chunks)
         else:
             audio = np.zeros((0, max(1, self.channels)), dtype=np.float32)

@@ -19,6 +19,20 @@ def test_snapshot_returns_requested_range():
     assert rec.snapshot(-1.0, 0.05).shape == (50, 1)
 
 
+def test_discard_before_frees_memory_but_keeps_absolute_times():
+    rec = Recorder()
+    rec.samplerate, rec.channels = 1000, 1
+    for i in range(10):
+        rec._queue.put(np.full((100, 1), i, np.float32))
+    rec.drain()
+    rec.discard_before(0.55)  # 500 프레임 이전 블록(0~4)을 버린다. 블록 5(500~599)는 남는다
+    assert len(rec._chunks) == 5 and rec._offsets[0] == 500
+    assert rec.elapsed == 1.0  # 녹음 시간은 그대로
+    snap = rec.snapshot(0.55, 0.75)
+    assert snap.shape == (200, 1) and snap[0, 0] == 5 and snap[-1, 0] == 7
+    assert rec.snapshot(0.1, 0.2).shape[0] == 0  # 버린 구간
+
+
 def test_file_input_stream_paces_audio_like_a_microphone(tmp_path):
     path = tmp_path / "a.wav"
     sf.write(path, np.full((48000, 2), 0.1, np.float32), 48000)

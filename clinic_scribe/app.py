@@ -27,6 +27,10 @@ def main(argv: list[str] | None = None) -> int:
              "(기본: samples/mock_consult.wav, 없으면 만든다)",
     )
     parser.add_argument("--demo-speed", type=float, default=1.0, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--summary", choices=("general", "chart"),
+        help="요약 종류: general = 일반 대화 요약, chart = 진료 차트 초안 (지정하지 않으면 마지막으로 고른 값)",
+    )
     args = parser.parse_args(argv)
     if args.open is not None and not args.open.is_file():
         parser.error(f"파일이 없습니다: {args.open}")
@@ -40,7 +44,10 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("clinic-scribe")
-    window = MainWindow(Settings.load(), demo_file=args.demo, demo_speed=args.demo_speed)
+    settings = Settings.load()
+    if args.summary:
+        settings.summary_mode = args.summary
+    window = MainWindow(settings, demo_file=args.demo, demo_speed=args.demo_speed)
     window.resize(1400, 900)
     window.show()
 

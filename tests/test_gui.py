@@ -1,5 +1,6 @@
 """오프스크린 Qt 화면 테스트. 마이크는 가짜 입력 스트림으로 대신한다(권한 대화상자 없음)."""
 
+import json
 import threading
 import time
 
@@ -83,6 +84,8 @@ def window(qapp, monkeypatch, tmp_path):
     monkeypatch.setattr(recorder.sd, "check_input_settings", lambda **kw: None)
     s = Settings()
     s.auto_summarize = False
+    s.view_mode = "developer"  # 아래 테스트 대부분은 개발자 대시보드의 위젯을 본다
+    s.summary_mode = "chart"
     s.claude_cli = make_fake_cli(tmp_path, "success")
     w = main_window.MainWindow(s)
     w.interactive = False
@@ -90,6 +93,20 @@ def window(qapp, monkeypatch, tmp_path):
     yield w
     w.shutdown()
     w.deleteLater()
+
+
+def press_space(window, autorepeat=False):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.sendEvent(
+        window, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier, " ", autorepeat)
+    )
+
+
+def transcript_text(session) -> str:
+    return " ".join(seg.text for seg in session.runs[-1].result.segments) if session.runs else ""
 
 
 def source_audio(path, rate=48000):
@@ -111,7 +128,7 @@ def test_record_button_flow_with_fake_microphone(window, qapp, samples):
     assert wait_until(qapp, lambda: window.session.draft is not None, 120)
     assert window.session.original_rate == 48000
     transcript = window.transcript_view.toPlainText()
-    assert "사흘 전부터" in transcript and "[00:00." in transcript
+    assert "사흘전부터" in transcript.replace(" ", "") and "[00:00." in transcript  # 띄어쓰기는 Whisper 마다 다름
     assert window.regions_table.rowCount() == 2
     assert "검토용 초안" in window.draft_view.toPlainText()
     window.copy_btn.click()
@@ -151,6 +168,7 @@ def test_demo_input_device_runs_without_microphone(qapp, monkeypatch, samples):
     w.interactive = False
     try:
         assert w.device_combo.currentText().startswith("데모 입력")
+        assert not w.demo_warning.isHidden()  # 마이크가 녹음되지 않는다는 경고
         assert w.record_btn.isEnabled()
         w.record_btn.click()
         assert w.recorder.active and "데모 입력" in w.status_badge.text()
@@ -159,6 +177,19 @@ def test_demo_input_device_runs_without_microphone(qapp, monkeypatch, samples):
         assert wait_until(qapp, lambda: w.session.runs, 60)
         assert "사흘" in w.transcript_view.toPlainText()
         assert w.session.source.startswith("데모 입력")
+    finally:
+        w.shutdown()
+
+
+def test_demo_warning_follows_selected_device(qapp, monkeypatch, samples):
+    from clinic_scribe.ui import main_window
+
+    monkeypatch.setattr(main_window, "list_input_devices", lambda refresh=False: [FAKE_DEVICE])
+    w = main_window.MainWindow(Settings(), demo_file=samples / "mock_consult_short.wav")
+    try:
+        assert w.device_combo.currentIndex() == 0 and not w.demo_warning.isHidden()
+        w.device_combo.setCurrentIndex(1)  # 마이크로 바꾸면 경고가 사라진다
+        assert w._selected_device() == FAKE_DEVICE and w.demo_warning.isHidden()
     finally:
         w.shutdown()
 
@@ -241,7 +272,7 @@ def test_summary_failure_keeps_transcript_and_retry_works(window, qapp, samples,
     window.open_audio_file(samples / "mock_consult_short.wav", confirm=False)
     assert wait_until(qapp, lambda: window.session.summary_error is not None)
     assert window.summary_error_label.isVisible() and "사용량 제한" in window.summary_error_label.text()
-    assert "사흘 전부터" in window.transcript_view.toPlainText()  # 전사문은 남아 있음
+    assert "사흘전부터" in window.transcript_view.toPlainText().replace(" ", "")  # 전사문은 남아 있음
     assert window.summary_btn.isEnabled() and window.summary_btn.text() == "요약 다시 시도"
     window.settings.claude_cli = make_fake_cli(tmp_path, "success")
     window.summary_btn.click()  # 다시 녹음하지 않고 같은 전사문으로 요약만 재시도
@@ -249,6 +280,29 @@ def test_summary_failure_keeps_transcript_and_retry_works(window, qapp, samples,
     assert not window.summary_error_label.isVisible()
     assert len(window.session.runs) == 1
     assert "3일 전부터 식후 속쓰림" in window.draft_view.toPlainText()
+
+
+def test_general_conversation_summary_and_switching_kind(window, qapp, samples, tmp_path):
+    """진료와 관계없는 대화도 '일반 대화 요약'으로 요약되고, 종류를 바꿔 같은 전사문으로 다시 요약할 수 있다."""
+    record = tmp_path / "general.json"
+    window.settings.auto_summarize = True
+    window.settings.claude_cli = make_fake_cli(tmp_path, "general", record)
+    window.summary_mode_combo.setCurrentIndex(window.summary_mode_combo.findData("general"))
+    assert window.draft_title.text() == "주요 내용 요약" and window.settings.summary_mode == "general"
+    window.open_audio_file(samples / "daily_chat.wav", confirm=False)
+    assert wait_until(qapp, lambda: window.session.draft is not None)
+    assert "한강에서 자전거" in window.draft_view.toPlainText() and "주요 내용" in window.draft_view.toPlainText()
+    assert "주요 내용 요약" in window.draft_basis_label.text()
+    sent = json.loads(record.read_text(encoding="utf-8"))
+    assert "one_line" in sent["argv"][sent["argv"].index("--json-schema") + 1]  # 주요 내용 요약 스키마로 요청
+    assert "치킨" in sent["stdin"]  # 일상 대화 전사문이 그대로 전달됨
+    # 진료 차트로 바꾸면 안내가 뜨고, 다시 녹음하지 않고 같은 전사문으로 다시 요약한다.
+    window.settings.claude_cli = make_fake_cli(tmp_path, "success")
+    window.summary_mode_combo.setCurrentIndex(window.summary_mode_combo.findData("chart"))
+    assert "요약 종류를 바꿨습니다" in window.draft_basis_label.text()
+    window.summary_btn.click()
+    assert wait_until(qapp, lambda: window.session.draft.kind_label == "차트 초안")
+    assert len(window.session.runs) == 1 and "주호소·현병력" in window.draft_view.toPlainText()
 
 
 def test_silence_file_is_not_summarized(window, qapp, samples, tmp_path):
@@ -263,12 +317,117 @@ def test_silence_file_is_not_summarized(window, qapp, samples, tmp_path):
     assert "음성이 감지되지 않아" in window.draft_view.toPlainText()
 
 
-def test_new_session_ignores_previous_results(window, qapp, samples):
+def test_each_session_keeps_its_own_results(window, qapp, samples):
     window.open_audio_file(samples / "injection.wav", confirm=False)
-    window.open_audio_file(samples / "mock_consult_short.wav", confirm=False)  # 앞 작업이 끝나기 전에 새 세션
-    assert wait_until(qapp, lambda: window.session.runs)
-    time.sleep(1.5)  # 취소된 앞 작업이 늦게 끝나도
-    qapp.processEvents()
-    assert window.session.source.endswith("mock_consult_short.wav")
-    assert len(window.session.runs) == 1
-    assert "기침" not in window.transcript_view.toPlainText()
+    window.open_audio_file(samples / "mock_consult_short.wav", confirm=False)  # 앞 진료 처리 중에 새 진료
+    assert wait_until(qapp, lambda: len(window.sessions) == 2 and all(s.runs for s in window.sessions), 60)
+    first, second = window.sessions
+    assert window.session is second and second.source.endswith("mock_consult_short.wav")
+    assert len(first.runs) == 1 and len(second.runs) == 1
+    assert "기침" in transcript_text(first) and "기침" not in transcript_text(second)  # 서로 섞이지 않는다
+    assert "기침" not in window.transcript_view.toPlainText()  # 화면에는 보고 있는 진료만
+
+
+def test_simple_view_space_bar_and_hidden_results(qapp, monkeypatch, samples, tmp_path):
+    """기본 화면: 스페이스바로 시작·종료, 대화 내용·요약은 눌러야 보인다."""
+    from clinic_scribe.ui import main_window
+
+    monkeypatch.setattr(main_window, "list_input_devices", lambda refresh=False: [FAKE_DEVICE])
+    monkeypatch.setattr(mic_permission, "authorization_status", lambda: "authorized")
+    monkeypatch.setattr(recorder.sd, "InputStream", FakeInputStream)
+    monkeypatch.setattr(recorder.sd, "check_input_settings", lambda **kw: None)
+    s = Settings()
+    s.claude_cli = make_fake_cli(tmp_path, "success")
+    w = main_window.MainWindow(s)
+    w.interactive = False
+    w.show()
+    try:
+        assert w.stack.currentWidget() is w.simple
+        assert w.simple.transcript_view.isHidden() and w.simple.summary_view.isHidden()
+        FakeInputStream.source = source_audio(samples / "mock_consult_short.wav")
+        press_space(w)
+        assert w.recorder.active and "녹음 종료" in w.simple.record_btn.text()
+        press_space(w, autorepeat=True)  # 길게 누른 반복 입력은 무시
+        assert w.recorder.active
+        assert wait_until(qapp, lambda: w.recorder.elapsed > 10.5, 10)
+        assert w.simple.elapsed.text() == "00:10"
+        press_space(w)
+        assert not w.recorder.active
+        assert wait_until(qapp, lambda: w.session.draft is not None)
+        assert w.simple.transcript_view.isHidden() and w.simple.summary_view.isHidden()  # 끝나도 숨긴 채
+        assert "준비됨" in w.simple.status.text()
+        assert w.simple.history.count() == 1 and "요약 준비됨" in w.simple.history.item(0).text()
+        w.simple.show_summary_btn.click()
+        assert not w.simple.summary_view.isHidden() and "주요 내용" in w.simple.summary_view.toPlainText()
+        w.simple.show_transcript_btn.click()
+        assert "사흘" in w.simple.transcript_view.toPlainText()
+        w.simple.copy_btn.click()
+        assert qapp.clipboard().text().startswith("[자동 요약]")
+        w.simple.developer_btn.click()
+        assert w.stack.currentWidget() is w.dev_page and w.settings.view_mode == "developer"
+    finally:
+        w.shutdown()
+
+
+def test_space_bar_leaves_text_fields_and_dialogs_alone(window, qapp, monkeypatch):
+    from PySide6.QtWidgets import QLineEdit, QWidget
+
+    from clinic_scribe.ui import main_window
+
+    FakeInputStream.source = np.zeros(48000 * 3, np.float32) + 1e-3
+    editor = QLineEdit()
+    monkeypatch.setattr(main_window.QApplication, "focusWidget", staticmethod(lambda: editor))
+    press_space(window)
+    assert not window.recorder.active  # 입력칸에 글을 쓰는 중에는 녹음하지 않는다
+    monkeypatch.setattr(main_window.QApplication, "focusWidget", staticmethod(lambda: None))
+    dialog = QWidget()
+    monkeypatch.setattr(main_window.QApplication, "activeModalWidget", staticmethod(lambda: dialog))
+    press_space(window)
+    assert not window.recorder.active  # 확인 창이 떠 있으면 그 창이 키를 쓴다
+    monkeypatch.setattr(main_window.QApplication, "activeModalWidget", staticmethod(lambda: None))
+    press_space(window)
+    assert window.recorder.active
+    window._on_cancel_recording()
+
+
+def test_auto_split_on_next_patient_cue(window, qapp, samples):
+    """스페이스바를 누르지 않아도 '들어오세요'에서 진료가 나뉘고 녹음은 이어진다."""
+    window.settings.min_session_s = 5
+    FakeInputStream.source = source_audio(samples / "two_patients.wav")
+    window.record_btn.click()
+    assert wait_until(qapp, lambda: len(window.sessions) == 2, 40)
+    assert window.recorder.active  # 녹음은 끊기지 않는다
+    first, second = window.sessions
+    assert "들어오세요" in first.end_reason and second.auto_continued
+    assert wait_until(qapp, lambda: window.recorder.elapsed > 19.5, 20)
+    window.record_btn.click()
+    assert wait_until(qapp, lambda: first.runs and second.runs, 60)
+    t1, t2 = transcript_text(first), transcript_text(second)
+    assert "사흘" in t1 and "목이" not in t1
+    assert "목이" in t2 and "사흘" not in t2
+    assert window.simple.history.count() == 2
+
+
+def test_auto_split_on_long_silence(window, qapp, samples):
+    window.settings.split_silence_s = 4
+    FakeInputStream.source = source_audio(samples / "long_pause.wav")
+    window.record_btn.click()
+    assert wait_until(qapp, lambda: len(window.sessions) == 2, 40)
+    first, second = window.sessions
+    assert first.end_reason == "무음 4초" and window.recorder.active
+    assert wait_until(qapp, lambda: window.recorder.elapsed > 19.5, 20)
+    window.record_btn.click()
+    assert wait_until(qapp, lambda: first.runs and second.runs, 60)
+    assert "사흘" in transcript_text(first) and "경과" not in transcript_text(first)
+    assert "경과" in transcript_text(second)
+
+
+def test_recording_stops_itself_after_long_idle(window, qapp, samples):
+    window.settings.auto_split = False
+    window.settings.auto_stop_idle_s = 3
+    FakeInputStream.source = source_audio(samples / "mock_consult_short.wav")
+    window.record_btn.click()
+    assert wait_until(qapp, lambda: not window.recorder.active, 30)  # 말이 끝나고 3초 뒤 스스로 멈춘다
+    assert "녹음 자동 멈춤" in window.session.end_reason
+    assert wait_until(qapp, lambda: window.session.runs, 60)
+    assert "사흘" in transcript_text(window.session)

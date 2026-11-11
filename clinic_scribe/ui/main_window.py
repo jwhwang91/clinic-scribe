@@ -1,52 +1,64 @@
-"""메인 창 (대시보드).
+"""메인 창.
 
-녹음 → 실시간 전사 미리보기 → whisper.cpp 최종 전사(로컬) → Claude Code CLI 차트 초안.
-위쪽: 녹음 버튼, 입력 파형, 진행 단계(① 녹음 → ② 전사 → ③ 요약 → ④ 검토), 음성 구간 타임라인.
-아래 왼쪽: 실시간 전사 / 전사문 / 음성 구간 / 비교 탭. 아래 오른쪽: 검토용 차트 초안.
+화면 두 개를 함께 쓴다.
+- 간단 화면(기본): 큰 녹음 버튼·경과 시간·상태와 진료 기록 목록만 보인다. 대화 내용·요약은 눌러야 펼쳐진다.
+- 개발자 대시보드: 입력 파형, 진행 단계, 음성 구간 타임라인, 실시간/최종 전사, 음성 구간, VAD 비교, 요약.
+스페이스바로 녹음을 시작·종료한다. 녹음 중 긴 침묵이나 다음 환자 신호("들어오세요" 등)가 나오면
+그 진료를 끝내고 녹음은 이어서 다음 진료로 넘어간다(자동 진료 나누기). 진료마다 따로 전사·요약한다.
 """
 
 from __future__ import annotations
 
 import html
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
     QTextBrowser,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from clinic_scribe import mic_permission, procutil
 from clinic_scribe.audio import WHISPER_SR, AudioFileError, load_audio_file, pcm_slice, rms_dbfs, to_mono, to_whisper_pcm
+from clinic_scribe.auto_split import find_cue, parse_cues
 from clinic_scribe.chart import ChartDraft, verify_draft
-from clinic_scribe.config import DEFAULT_CLAUDE_MODEL, Settings, VadParams
+from clinic_scribe.config import DEFAULT_CLAUDE_MODEL, SUMMARY_MODES, Settings, VadParams
+from clinic_scribe.conversation_summary import ConversationSummary
 from clinic_scribe.export import export_session
-from clinic_scribe.live_monitor import LiveActivityMonitor, LiveClip
+from clinic_scribe.live_monitor import LiveActivityMonitor
 from clinic_scribe.live_transcriber import LiveTranscriber
 from clinic_scribe.recorder import InputDevice, Recorder, RecorderError, demo_device, list_input_devices
 from clinic_scribe.session import Session, TranscriptRun
 from clinic_scribe.summarizer import ClaudeConfig, SummaryError, summarize
 from clinic_scribe.ui.settings_dialog import SettingsDialog
+from clinic_scribe.ui.simple_view import SimpleView
 from clinic_scribe.ui.tasks import Job, Task, TaskRunner
 from clinic_scribe.ui.widgets import LevelMeter, PipelineView, TimelineView, WaveformView
 from clinic_scribe.whisper import TranscriptionResult, WhisperConfig, WhisperError, WhisperRunner, format_time
@@ -64,21 +76,23 @@ PRIVACY_NOTE = (
     "녹음과 전사(whisper.cpp)는 이 Mac 에서만 처리됩니다. "
     "요약을 요청하면 전사문이 Claude Code CLI 를 통해 Claude 서비스(Anthropic)로 전송됩니다. 가상 진료 데이터로만 테스트하세요."
 )
-DRAFT_PLACEHOLDER = "녹음을 마치거나 오디오 파일을 불러오면 이곳에 검토용 차트 초안이 표시됩니다."
+DRAFT_PLACEHOLDER = "녹음을 마치거나 오디오 파일을 불러오면 이곳에 요약이 표시됩니다."
 LIVE_PAD_S = 0.3  # 실시간 미리보기 클립 앞뒤 여유
+KEEP_AUDIO_SESSIONS = 5  # 녹음(16 kHz)을 메모리에 남겨 둘 최근 진료 수 (다시 전사·재생용)
+MAX_SESSIONS = 200
 
 
 def _mmss(seconds: float) -> str:
-    seconds = int(seconds)
+    seconds = int(max(0.0, seconds))
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
 @dataclass
 class LiveEntry:
-    clip_id: int
+    clip_id: int  # -1 이면 진료 구분선
     start: float
     end: float | None = None
-    status: str = "listening"  # listening / pending / done / off / stopped / error
+    status: str = "listening"  # listening / pending / done / off / stopped / error / split
     text: str = ""
 
 
@@ -105,15 +119,18 @@ class MainWindow(QMainWindow):
         self.tasks.finished.connect(self._on_task_finished)
         self._permission = _PermissionBridge(self)
         self._permission.result.connect(self._on_permission_result)
-        self.session: Session | None = None
+        self.sessions: list[Session] = []  # 이번 실행의 진료 기록 (오래된 것부터)
+        self.session: Session | None = None  # 화면에 보이는 진료
+        self._recording_session: Session | None = None  # 지금 소리를 받는 진료
+        self._recording_id = 0  # 연속 녹음 번호 (실시간 전사 결과 구분)
+        self._recording_started: datetime | None = None
         self._session_counter = 0
-        self._transcribe_task: Task | None = None
-        self._summary_task: Task | None = None
+        self._tasks: dict[tuple[int, str], Task] = {}  # (진료 번호, "transcribe"/"summary") → 작업
         self._waiting_permission = False
         self._silent_warned = False
         self._last_record_second = -1
         self._devices: list[InputDevice] = []
-        self._status: tuple[str, str] = ("대기 중", "idle")
+        self._status: tuple[str, str] = ("대기 중 · 스페이스바로 녹음 시작", "idle")
         self._demo_device: InputDevice | None = None
         self._demo_error: str | None = None
         if demo_file is not None:
@@ -129,15 +146,18 @@ class MainWindow(QMainWindow):
         self._busy_timer.setInterval(500)
         self._busy_timer.timeout.connect(self._refresh_status_badge)
 
-        self.setWindowTitle("clinic-scribe 대시보드 — 모의 진료 녹음 · 실시간 전사 · 검토용 차트 초안")
+        self.setWindowTitle("clinic-scribe — 녹음 · 전사 · 요약")
         self._build_ui()
         self._load_devices(refresh=False)
         if self._demo_error:
             self._show_error(self._demo_error)
         self._refresh_mic_status()
         self._refresh_tool_status()
+        self._refresh_auto_split_note()
         self._show_session()
         self._render_live()
+        # 스페이스바 = 녹음 시작/종료 (어느 화면에서든)
+        QApplication.instance().installEventFilter(self)
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -164,7 +184,21 @@ class MainWindow(QMainWindow):
         settings_btn = QPushButton("설정…")
         settings_btn.clicked.connect(self._open_settings)
         device_row.addWidget(settings_btn)
+        simple_btn = QPushButton("간단히 보기")
+        simple_btn.setToolTip("녹음 버튼과 상태만 보이는 기본 화면으로 돌아갑니다.")
+        simple_btn.clicked.connect(lambda: self._set_view("simple"))
+        device_row.addWidget(simple_btn)
         root.addLayout(device_row)
+        self.demo_warning = QLabel(
+            "데모 입력이 골라져 있습니다. 녹음 버튼을 누르면 데모 오디오 파일이 들어가고 마이크 소리는 녹음되지 않습니다. "
+            "내 목소리로 하려면 위 입력 장치를 'MacBook Pro 마이크' 같은 마이크로 바꾸세요."
+        )
+        self.demo_warning.setWordWrap(True)
+        self.demo_warning.setStyleSheet(
+            "color: #92400e; background: #fef3c7; border: 1px solid #f59e0b; padding: 6px; font-weight: bold;"
+        )
+        self.demo_warning.hide()
+        root.addWidget(self.demo_warning)
 
         # 녹음 줄: 버튼 · 경과 시간 · 입력 파형 · 상태
         record_row = QHBoxLayout()
@@ -177,7 +211,7 @@ class MainWindow(QMainWindow):
         self.record_btn.clicked.connect(self._on_record_clicked)
         record_row.addWidget(self.record_btn)
         self.cancel_rec_btn = QPushButton("녹음 취소")
-        self.cancel_rec_btn.setToolTip("녹음을 버리고 마이크를 놓습니다.")
+        self.cancel_rec_btn.setToolTip("지금 녹음 중인 진료를 버리고 마이크를 놓습니다.")
         self.cancel_rec_btn.clicked.connect(self._on_cancel_recording)
         record_row.addWidget(self.cancel_rec_btn)
 
@@ -201,6 +235,7 @@ class MainWindow(QMainWindow):
         self.status_badge = QLabel()
         self.status_badge.setMinimumWidth(250)
         self.status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_badge.setWordWrap(True)
         state_col.addWidget(self.status_badge)
         self.live_indicator = QLabel()
         self.live_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -213,7 +248,7 @@ class MainWindow(QMainWindow):
         self.open_btn.clicked.connect(self._on_open_file)
         file_col.addWidget(self.open_btn)
         self.cancel_task_btn = QPushButton("처리 취소")
-        self.cancel_task_btn.setToolTip("진행 중인 전사·요약을 멈춥니다. 녹음과 전사문은 남습니다.")
+        self.cancel_task_btn.setToolTip("보고 있는 진료의 전사·요약을 멈춥니다. 녹음과 전사문은 남습니다.")
         self.cancel_task_btn.clicked.connect(self._on_cancel_tasks)
         file_col.addWidget(self.cancel_task_btn)
         record_row.addLayout(file_col)
@@ -245,7 +280,8 @@ class MainWindow(QMainWindow):
         self.live_check = QCheckBox("실시간 전사 미리보기")
         self.live_check.setToolTip(
             "녹음 중 말이 끊길 때마다 그 부분을 whisper.cpp 로 바로 전사해 보여 줍니다(이 Mac).\n"
-            "녹음이 끝나면 전체 녹음으로 다시 전사한 결과가 '전사문' 탭에 나옵니다."
+            "녹음이 끝나면 전체 녹음으로 다시 전사한 결과가 '전사문' 탭에 나옵니다.\n"
+            "자동 진료 나누기의 신호 단어 감지도 이 실시간 전사를 씁니다."
         )
         self.live_check.setChecked(self.settings.live_preview)
         self.live_check.toggled.connect(self._on_live_toggled)
@@ -264,11 +300,28 @@ class MainWindow(QMainWindow):
         splitter.setSizes([660, 660])
         root.addWidget(splitter, 1)
 
-        self.setCentralWidget(central)
+        # 화면 두 개: 간단 화면(기본) / 개발자 대시보드. 녹음·진료 상태는 함께 쓴다.
+        self.dev_page = central
+        self.simple = SimpleView()
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.simple)
+        self.stack.addWidget(self.dev_page)
+        self.setCentralWidget(self.stack)
+        self.simple.device_combo.setModel(self.device_combo.model())
+        self.device_combo.currentIndexChanged.connect(self.simple.device_combo.setCurrentIndex)
+        self.simple.device_combo.currentIndexChanged.connect(self.device_combo.setCurrentIndex)
+        self.simple.record_clicked.connect(self._on_record_clicked)
+        self.simple.retry_clicked.connect(self._on_summary_clicked)
+        self.simple.copy_clicked.connect(self._on_copy)
+        self.simple.settings_clicked.connect(self._open_settings)
+        self.simple.developer_clicked.connect(lambda: self._set_view("developer"))
+        self.simple.history_selected.connect(self._on_history_selected)
+
         self.tool_status_label = QLabel()
         self.tool_status_label.setStyleSheet("color: gray;")
         self.statusBar().addWidget(self.tool_status_label, 1)
         self._on_vad_options_changed()
+        self._set_view(self.settings.view_mode)
 
     def _spin(self, value: int, lo: int, hi: int, step: int, tip: str) -> QSpinBox:
         spin = QSpinBox()
@@ -356,15 +409,30 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        title = QLabel("차트 초안 (검토용 초안)")
-        title.setStyleSheet("font-weight: bold; font-size: 15px;")
-        layout.addWidget(title)
+        header = QHBoxLayout()
+        self.draft_title = QLabel()
+        self.draft_title.setStyleSheet("font-weight: bold; font-size: 15px;")
+        header.addWidget(self.draft_title)
+        header.addStretch(1)
+        header.addWidget(QLabel("요약 종류"))
+        self.summary_mode_combo = QComboBox()
+        for mode, label in SUMMARY_MODES.items():
+            self.summary_mode_combo.addItem(label, mode)
+        self.summary_mode_combo.setCurrentIndex(max(0, self.summary_mode_combo.findData(self.settings.summary_mode)))
+        self.summary_mode_combo.setToolTip(
+            "주요 내용 요약: 한 줄 요약과 주제별 주요 내용·할 일. 진료 차트 초안: 주호소·진찰·평가/계획·확인 필요.\n"
+            "바꾼 뒤 '요약 다시 시도'를 누르면 같은 전사문으로 다시 요약합니다(다시 녹음할 필요 없음)."
+        )
+        self.summary_mode_combo.currentIndexChanged.connect(self._on_summary_mode_changed)
+        header.addWidget(self.summary_mode_combo)
+        layout.addLayout(header)
         privacy = QLabel(PRIVACY_NOTE)
         privacy.setWordWrap(True)
         privacy.setStyleSheet("color: #92400e; background: #fffbeb; border: 1px solid #fcd34d; padding: 4px;")
         layout.addWidget(privacy)
         self.draft_basis_label = QLabel()
         self.draft_basis_label.setStyleSheet("color: gray;")
+        self.draft_basis_label.setWordWrap(True)
         layout.addWidget(self.draft_basis_label)
         self.summary_error_label = QLabel()
         self.summary_error_label.setWordWrap(True)
@@ -378,7 +446,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.draft_view, 1)
         buttons = QHBoxLayout()
         self.summary_btn = QPushButton("요약 요청")
-        self.summary_btn.setToolTip("선택한 전사 결과로 차트 초안을 (다시) 만듭니다. 다시 녹음할 필요가 없습니다.")
+        self.summary_btn.setToolTip("선택한 전사 결과로 요약을 (다시) 만듭니다. 다시 녹음할 필요가 없습니다.")
         self.summary_btn.clicked.connect(self._on_summary_clicked)
         buttons.addWidget(self.summary_btn)
         self.evidence_check = QCheckBox("근거 문장 표시")
@@ -387,39 +455,81 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self.evidence_check)
         buttons.addStretch(1)
         self.copy_btn = QPushButton("복사")
-        self.copy_btn.setToolTip("'검토용 초안' 표시와 함께 클립보드에 복사합니다.")
+        self.copy_btn.setToolTip("요약을 머리말과 함께 클립보드에 복사합니다.")
         self.copy_btn.clicked.connect(self._on_copy)
         buttons.addWidget(self.copy_btn)
         self.export_btn = QPushButton("내보내기…")
-        self.export_btn.setToolTip("고른 위치에 전사문·차트 초안(.md)과 선택 시 녹음(.wav)을 저장합니다.")
+        self.export_btn.setToolTip("고른 위치에 전사문·요약(.md)과 선택 시 녹음(.wav)을 저장합니다.")
         self.export_btn.clicked.connect(self._on_export)
         buttons.addWidget(self.export_btn)
         layout.addLayout(buttons)
+        self._refresh_draft_title()
         return panel
+
+    def _set_view(self, mode: str) -> None:
+        self.settings.view_mode = mode if mode in ("simple", "developer") else "simple"
+        simple = self.settings.view_mode == "simple"
+        self.stack.setCurrentWidget(self.simple if simple else self.dev_page)
+        self.statusBar().setVisible(not simple)
+
+    # -------------------------------------------------------- 스페이스바 토글
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Space
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+            and self._space_toggles_recording(watched)
+        ):
+            if not event.isAutoRepeat():  # 길게 눌러도 한 번만
+                self._on_record_clicked()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _space_toggles_recording(self, watched: QObject) -> bool:
+        if QApplication.activeModalWidget() is not None:  # 확인 창·설정 창이 떠 있으면 그 창이 키를 쓴다
+            return False
+        if not isinstance(watched, QWidget) or watched.window() is not self:
+            return False
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QAbstractSpinBox)):
+            return False
+        if isinstance(focus, (QTextEdit, QPlainTextEdit)) and not focus.isReadOnly():
+            return False
+        return self.recorder.active or self.record_btn.isEnabled()
 
     # ------------------------------------------------------------ 상태 표시
     def _set_status(self, text: str, kind: str = "idle") -> None:
         self._status = (text, kind)
         self._refresh_status_badge()
 
+    def _task(self, session: Session | None, kind: str) -> Task | None:
+        return self._tasks.get((session.session_id, kind)) if session is not None else None
+
     def _refresh_status_badge(self) -> None:
-        busy = self._transcribe_task is not None or self._summary_task is not None
+        s = self.session
+        background = {sid for sid, _kind in self._tasks if s is None or sid != s.session_id}
+        transcribing = self._task(s, "transcribe")
+        summarizing = self._task(s, "summary")
         if self.recorder.active:
+            rec = self._recording_session
             demo = self.recorder.device is not None and self.recorder.device.demo_file
-            text, kind = ("● 녹음 중 (데모 입력)" if demo else "● 녹음 중"), "recording"
+            text = "● 녹음 중" + (" (데모 입력)" if demo else "")
+            if rec is not None and len(self.sessions) > 1:
+                text += f" · 진료 #{rec.session_id}"
+            if background:
+                text += f" · 이전 진료 처리 중 {len(background)}건"
+            kind = "recording"
         elif self._waiting_permission:
             text, kind = "마이크 권한 요청 중…", "busy"
-        elif busy:
+        elif transcribing or summarizing:
             parts = []
-            if self._transcribe_task is not None:
-                elapsed = self._transcribe_task.elapsed
-                parts.append(f"전사 중… {elapsed:.0f}초")
-                self.pipeline.set_step("transcribe", "active", f"처리 중… {elapsed:.0f}초")
-            if self._summary_task is not None:
-                elapsed = self._summary_task.elapsed
-                parts.append(f"요약 중… {elapsed:.0f}초")
-                self.pipeline.set_step("summary", "active", f"Claude 응답 대기… {elapsed:.0f}초")
-            text, kind = " · ".join(parts), ("busy" if self._transcribe_task is not None else "summary")
+            if transcribing:
+                parts.append(f"전사 중… {transcribing.elapsed:.0f}초")
+            if summarizing:
+                parts.append(f"요약 중… {summarizing.elapsed:.0f}초")
+            text, kind = " · ".join(parts), ("busy" if transcribing else "summary")
+        elif background:
+            text, kind = f"이전 진료 처리 중 {len(background)}건", "busy"
         else:
             text, kind = self._status
         bg, fg = STATUS_COLORS.get(kind, STATUS_COLORS["idle"])
@@ -427,10 +537,58 @@ class MainWindow(QMainWindow):
         self.status_badge.setStyleSheet(
             f"background: {bg}; color: {fg}; border-radius: 6px; padding: 6px 10px; font-weight: bold;"
         )
+        self.simple.set_status(text, kind)
+        self._refresh_pipeline()
+        busy = bool(self._tasks)
         if busy and not self._busy_timer.isActive():
             self._busy_timer.start()
         elif not busy and self._busy_timer.isActive():
             self._busy_timer.stop()
+
+    def _refresh_pipeline(self) -> None:
+        """진행 단계는 보이는 진료의 상태에서 계산한다 (진료가 여러 개라 이벤트마다 설정하지 않는다)."""
+        s, p = self.session, self.pipeline
+        if s is None:
+            p.reset()
+            return
+        if s is self._recording_session and self.recorder.active:
+            demo = self.recorder.device is not None and self.recorder.device.demo_file
+            p.set_step("record", "active", _mmss(self.recorder.elapsed - s.offset_s) + (" · 데모 입력" if demo else ""))
+        elif s.source.startswith("파일"):
+            p.set_step("record", "done", s.source)
+        elif s.duration_s > 0:
+            reason = f" · {s.end_reason}" if s.end_reason else ""
+            p.set_step("record", "done", f"{_mmss(s.duration_s)} 녹음{reason}")
+        else:
+            p.set_step("record", "idle")
+        task = self._task(s, "transcribe")
+        if task is not None:
+            p.set_step("transcribe", "active", f"처리 중… {task.elapsed:.0f}초")
+        elif s.transcribe_error:
+            p.set_step("transcribe", "error", "실패 · 위 안내 참고")
+        elif s.runs:
+            r = s.runs[-1].result
+            regions = f" · 구간 {len(r.regions)}개" if r.regions is not None else ""
+            p.set_step("transcribe", "done", f"{s.transcribe_seconds:.1f}초 · 문장 {len(r.segments)}개{regions}")
+        elif s.summary_short and not s.runs:
+            p.set_step("transcribe", "skipped", s.summary_short)
+        else:
+            p.set_step("transcribe", "idle")
+        task = self._task(s, "summary")
+        if task is not None:
+            p.set_step("summary", "active", f"Claude 응답 대기… {task.elapsed:.0f}초")
+        elif s.summary_error:
+            p.set_step("summary", "error", "실패 · '요약 다시 시도' 가능")
+        elif s.draft is not None:
+            p.set_step("summary", "done", f"{s.summary_seconds:.1f}초 · {s.draft.kind_label}")
+        elif s.summary_short and s.runs:
+            p.set_step("summary", "skipped", s.summary_short)
+        else:
+            p.set_step("summary", "idle")
+        if s.draft is not None:
+            p.set_step("review", "active", f"{s.draft.kind_label} 확인")
+        else:
+            p.set_step("review", "idle")
 
     def _show_error(self, message: str, warn: bool = False) -> None:
         style = (
@@ -441,18 +599,21 @@ class MainWindow(QMainWindow):
         self.error_label.setStyleSheet(style)
         self.error_label.setText(message)
         self.error_label.show()
+        self.simple.set_error(message, warn)
 
     def _clear_error(self) -> None:
         self.error_label.clear()
         self.error_label.hide()
+        self.simple.set_error(None)
 
     def _refresh_controls(self) -> None:
         recording = self.recorder.active
         s = self.session
+        live_session = s is not None and s is self._recording_session and recording
         has_audio = s is not None and s.pcm16 is not None
         run = self._current_run()
-        summarizing = self._summary_task is not None
-        transcribing = self._transcribe_task is not None
+        summarizing = self._task(s, "summary") is not None
+        transcribing = self._task(s, "transcribe") is not None
 
         self.record_btn.setText("■  종료하고 요약" if recording else "●  녹음 시작")
         self.record_btn.setStyleSheet(
@@ -465,24 +626,68 @@ class MainWindow(QMainWindow):
         self.refresh_devices_btn.setEnabled(not recording)
         self.open_btn.setEnabled(not recording and not self._waiting_permission)
         self.cancel_task_btn.setEnabled(transcribing or summarizing)
-        self.retranscribe_btn.setEnabled(has_audio and not recording and not transcribing)
-        can_summarize = run is not None and not run.result.is_empty and not summarizing and not recording
+        self.retranscribe_btn.setEnabled(has_audio and not live_session and not transcribing)
+        can_summarize = run is not None and not run.result.is_empty and not summarizing and not live_session
         self.summary_btn.setEnabled(can_summarize)
         self.summary_btn.setText("요약 다시 시도" if s is not None and (s.draft or s.summary_error) else "요약 요청")
         self.copy_btn.setEnabled(s is not None and s.draft is not None)
         self.export_btn.setEnabled(s is not None and s.has_results)
         self.play_btn.setEnabled(has_audio and not recording)
+        self.simple.set_recording(recording, self.record_btn.isEnabled())
+        self.simple.device_combo.setEnabled(not recording)
+        self.simple.set_results(
+            has_transcript=run is not None and not live_session,
+            has_summary=s is not None and not live_session and (s.draft is not None or bool(s.summary_note)),
+            can_copy=s is not None and s.draft is not None,
+        )
+        self.simple.retry_btn.setVisible(can_summarize and s is not None and bool(s.summary_error))
+        self._refresh_history()
         self._refresh_status_badge()
+
+    def _refresh_history(self) -> None:
+        rows = [(sess.session_id, self._history_line(sess)) for sess in reversed(self.sessions)]
+        self.simple.set_history(rows, self.session.session_id if self.session else None)
+
+    def _history_line(self, sess: Session) -> str:
+        start = sess.created_at.strftime("%H:%M")
+        if sess is self._recording_session and self.recorder.active:
+            return f"#{sess.session_id}   {start}~   ● 녹음 중"
+        if sess.source.startswith("파일"):
+            span = f"{start}   {sess.source}"
+        elif sess.duration_s > 0:
+            end = (sess.created_at + timedelta(seconds=sess.duration_s)).strftime("%H:%M")
+            span = f"{start}–{end} ({_mmss(sess.duration_s)})"
+        else:
+            span = start
+        reason = f"   · {sess.end_reason}" if sess.end_reason and sess.end_reason != "직접 종료" else ""
+        return f"#{sess.session_id}   {span}   {self._session_status(sess)}{reason}"
+
+    def _session_status(self, sess: Session) -> str:
+        if self._task(sess, "transcribe"):
+            return "전사 중…"
+        if self._task(sess, "summary"):
+            return "요약 중…"
+        if sess.draft is not None:
+            return "요약 준비됨"
+        if sess.summary_error:
+            return "요약 실패"
+        if sess.transcribe_error:
+            return "전사 실패"
+        if sess.summary_short:
+            return sess.summary_short
+        if sess.runs:
+            return "전사 완료"
+        return "대기"
 
     def _refresh_mic_status(self) -> None:
         status = mic_permission.authorization_status()
         label = mic_permission.STATUS_LABEL.get(status, status)
         color = {"authorized": "#166534", "denied": "#b91c1c", "restricted": "#b91c1c"}.get(status, "#6b7280")
-        self.mic_status_label.setText(f"마이크 권한: {label}")
-        self.mic_status_label.setStyleSheet(f"color: {color};")
-        self.mic_status_label.setToolTip(
-            f"권한을 받는 앱: {mic_permission.host_app_name()}\n확인 위치: {mic_permission.SETTINGS_PATH}"
-        )
+        tip = f"권한을 받는 앱: {mic_permission.host_app_name()}\n확인 위치: {mic_permission.SETTINGS_PATH}"
+        for target in (self.mic_status_label, self.simple.mic_status):
+            target.setText(f"마이크 권한: {label}")
+            target.setStyleSheet(f"color: {color};")
+            target.setToolTip(tip)
 
     def _refresh_tool_status(self) -> None:
         s = self.settings
@@ -501,6 +706,15 @@ class MainWindow(QMainWindow):
         self.tool_status_label.setToolTip(
             f"whisper-cli: {cli}\nWhisper 모델: {model}\nVAD 모델: {vad}\nclaude: {claude}"
         )
+
+    def _refresh_auto_split_note(self) -> None:
+        s = self.settings
+        if s.auto_split:
+            cues = ", ".join(f"'{c}'" for c in parse_cues(s.split_cues_next)[:2])
+            text = f"자동 나누기 켜짐 · 말 없이 {s.split_silence_s}초가 지나거나 다음 환자 신호({cues} 등)가 나오면 다음 진료로 넘어갑니다"
+        else:
+            text = "자동 나누기 꺼짐 · 스페이스바로만 진료를 끝냅니다"
+        self.simple.auto_split_note.setText(text)
 
     # ------------------------------------------------------------ 입력 장치
     def _load_devices(self, refresh: bool) -> None:
@@ -524,10 +738,12 @@ class MainWindow(QMainWindow):
                 preferred = next((i for i, d in enumerate(self._devices) if d.is_default), 0)
         self.device_combo.setCurrentIndex(preferred)
         self.device_combo.blockSignals(False)
+        self.simple.device_combo.setCurrentIndex(preferred)  # 같은 목록(모델)을 쓰는 간단 화면 쪽 선택 맞추기
         default = next((d for d in devices if d.is_default), None)
         self.default_device_label.setText(f"시스템 기본 입력: {default.name if default else '없음'}")
         if not self._devices:
             self._show_error("사용할 수 있는 입력 장치가 없습니다. 마이크를 연결한 뒤 '장치 새로고침'을 누르거나, 오디오 파일을 불러와 테스트하세요.", warn=True)
+        self._refresh_demo_warning()
         self._refresh_controls()
 
     def _selected_device(self) -> InputDevice | None:
@@ -538,8 +754,15 @@ class MainWindow(QMainWindow):
         device = self._selected_device()
         if device is not None and not device.demo_file:
             self.settings.input_device = device.name
+        self._refresh_demo_warning()
 
-    # ---------------------------------------------------------------- 세션
+    def _refresh_demo_warning(self) -> None:
+        device = self._selected_device()
+        demo = bool(device is not None and device.demo_file)
+        self.demo_warning.setVisible(demo)
+        self.simple.demo_warning.setVisible(demo)
+
+    # ---------------------------------------------------------------- 진료
     def _confirm(self, title: str, text: str) -> bool:
         if not self.interactive:
             return True
@@ -550,40 +773,41 @@ class MainWindow(QMainWindow):
         )
         return answer == QMessageBox.StandardButton.Yes
 
-    def _confirm_new_session(self) -> bool:
-        if self._transcribe_task is not None or self._summary_task is not None:
-            if not self._confirm("새로 시작", "진행 중인 전사·요약을 취소하고 새로 시작할까요?"):
-                return False
-        elif self.session is not None and self.session.has_results and not self.session.exported:
-            if not self._confirm("새로 시작", "현재 전사·요약 결과는 내보내지 않았습니다. 지우고 새로 시작할까요?"):
-                return False
-        return True
-
-    def _new_session(self, source: str) -> Session:
-        self._cancel_tasks()
-        self.live_transcriber.cancel_all()
-        self._stop_playback()
+    def _create_session(self, source: str, offset_s: float = 0.0, started: datetime | None = None) -> Session:
         self._session_counter += 1
-        self.session = Session(session_id=self._session_counter, source=source)
-        self.live.reset()
-        self._live_entries = []
-        self._live_runner = None
-        self._live_issue = None
-        self.pipeline.reset()
-        self.timeline.clear()
-        self.waveform.clear()
-        self._clear_error()
-        self._set_status("대기 중", "idle")
-        self._show_session()
-        self._render_live()
-        return self.session
+        session = Session(session_id=self._session_counter, source=source, offset_s=offset_s)
+        if started is not None:
+            session.created_at = started
+        self.sessions.append(session)
+        self._trim_history()
+        return session
 
-    def _cancel_tasks(self) -> None:
-        for task in (self._transcribe_task, self._summary_task):
+    def _trim_history(self) -> None:
+        """오래된 진료의 녹음은 메모리에서 놓고, 목록이 너무 길면 오래된 것부터 지운다."""
+        busy = {sid for sid, _kind in self._tasks}
+        for old in self.sessions[:-KEEP_AUDIO_SESSIONS]:
+            if old.session_id not in busy and old is not self.session:
+                old.pcm16 = None
+        while len(self.sessions) > MAX_SESSIONS and self.sessions[0].session_id not in busy:
+            self.sessions.pop(0)
+
+    def _session_by_id(self, session_id: int) -> Session | None:
+        return next((s for s in self.sessions if s.session_id == session_id), None)
+
+    def _select_session(self, session: Session | None) -> None:
+        self.session = session
+        self._show_session()
+
+    def _on_history_selected(self, session_id: int) -> None:
+        session = self._session_by_id(session_id)
+        if session is not None and session is not self.session:
+            self._select_session(session)
+
+    def _cancel_session_tasks(self, session: Session) -> None:
+        for kind in ("transcribe", "summary"):
+            task = self._tasks.pop((session.session_id, kind), None)
             if task is not None:
                 task.cancel.set()
-        self._transcribe_task = None
-        self._summary_task = None
 
     def _current_run(self) -> TranscriptRun | None:
         if self.session is None:
@@ -592,7 +816,7 @@ class MainWindow(QMainWindow):
 
     def _show_session(self) -> None:
         s = self.session
-        self.source_label.setText(f"· {s.source}" if s else "")
+        self.source_label.setText(f"· 진료 #{s.session_id} · {s.source}" if s else "")
         self.run_combo.blockSignals(True)
         self.run_combo.clear()
         for run in s.runs if s else []:
@@ -616,9 +840,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- 녹음
     def _on_record_clicked(self) -> None:
         if self.recorder.active:
-            self._stop_recording_and_process()
-            return
-        if not self._confirm_new_session():
+            self._stop_recording_and_process("직접 종료")
             return
         device = self._selected_device()
         if device is None:
@@ -655,23 +877,36 @@ class MainWindow(QMainWindow):
             self._refresh_controls()
 
     def _start_recording(self, device: InputDevice) -> None:
-        source = f"데모 입력 · {Path(device.demo_file).name}" if device.demo_file else f"마이크 · {device.name}"
-        self._new_session(source=source)
+        self._stop_playback()
         try:
             self.recorder.start(device)
         except RecorderError as exc:
             self._show_error(f"{exc}\n장치를 다시 고르거나 '장치 새로고침' 후 다시 시도하세요.")
             self._set_status("녹음 시작 실패", "error")
-            self.pipeline.set_step("record", "error", "시작 실패")
             self._refresh_controls()
             return
-        self._silent_warned = False
-        self._last_record_second = -1
+        source = f"데모 입력 · {Path(device.demo_file).name}" if device.demo_file else f"마이크 · {device.name}"
+        self._recording_id += 1
+        self._recording_started = datetime.now()
+        session = self._create_session(source, 0.0, self._recording_started)
+        self._recording_session = session
+        self.live_transcriber.cancel_all()
         self.live = LiveActivityMonitor(
             min_speech_ms=self.min_speech_spin.value(), min_silence_ms=self.silence_spin.value()
         )
+        self._live_entries = []
+        self._live_runner = None
+        self._live_issue = None
+        self._silent_warned = False
+        self._last_record_second = -1
+        self.waveform.clear()
+        self.timeline.clear()
         self.elapsed_label.setText("00:00")
-        self.pipeline.set_step("record", "active", "00:00" + (" · 데모 입력" if device.demo_file else ""))
+        self.simple.elapsed.setText("00:00")
+        self.simple.collapse_results()
+        self._clear_error()
+        self._set_status("녹음 중", "recording")
+        self._select_session(session)
         self.tabs.setCurrentWidget(self.live_view)
         self._render_live()
         self._rec_timer.start()
@@ -684,21 +919,25 @@ class MainWindow(QMainWindow):
         if blocks:
             mono = to_mono(np.concatenate(blocks))
             peak = float(np.max(np.abs(mono))) if mono.size else 0.0
-            self.level_meter.set_level(rms_dbfs(mono))
+            level = rms_dbfs(mono)
+            self.level_meter.set_level(level)
+            self.simple.level.set_level(level)
             for block in blocks:
                 for event in self.live.feed(to_mono(block), rate):
                     self._on_live_event(event)
         self.waveform.push(peak, self.live.in_speech)
-        elapsed = self.recorder.elapsed
-        self.elapsed_label.setText(_mmss(elapsed))
+        total = self.recorder.elapsed
+        rec = self._recording_session
+        consult = total - (rec.offset_s if rec is not None else 0.0)
+        self.elapsed_label.setText(_mmss(consult))
+        self.simple.elapsed.setText(_mmss(consult))
         self.timeline.set_data(
-            elapsed, [(c.start, c.end if c.end is not None else self.live.time) for c in self.live.clips],
-            live=True, cursor=elapsed,
+            total, [(c.start, c.end if c.end is not None else self.live.time) for c in self.live.clips],
+            live=True, cursor=total,
         )
-        if int(elapsed) != self._last_record_second:
-            self._last_record_second = int(elapsed)
-            demo = self.recorder.device is not None and self.recorder.device.demo_file
-            self.pipeline.set_step("record", "active", _mmss(elapsed) + (" · 데모 입력" if demo else ""))
+        if int(total) != self._last_record_second:
+            self._last_record_second = int(total)
+            self._refresh_pipeline()
         speaking = self.live.in_speech
         self.live_indicator.setText("● 말하는 중" if speaking else "○ 조용함")
         self.live_indicator.setStyleSheet("color: #15803d; font-weight: bold;" if speaking else "color: gray;")
@@ -707,7 +946,81 @@ class MainWindow(QMainWindow):
             self._show_error(mic_permission.silent_input_message(), warn=True)
         if self.recorder.active and not self.recorder.stream_alive():
             self._show_error("입력 장치에서 소리가 더 들어오지 않습니다(연결이 끊겼을 수 있음). 지금까지 녹음한 내용으로 전사합니다.", warn=True)
-            self._stop_recording_and_process()
+            self._stop_recording_and_process("입력 끊김")
+            return
+        self._check_auto_split()
+
+    # ------------------------------------------------------- 자동 진료 나누기
+    def _last_speech_end(self, after: float | None = None) -> float | None:
+        ends = [c.end for c in self.live.clips if c.end is not None and (after is None or c.end > after + 0.05)]
+        return max(ends) if ends else None
+
+    def _check_auto_split(self) -> None:
+        s = self.settings
+        rec = self._recording_session
+        if rec is None or not self.recorder.active or self.live.in_speech:
+            return
+        now = self.live.time
+        last = self._last_speech_end()
+        if s.auto_stop_idle_s > 0 and now - (last if last is not None else 0.0) >= s.auto_stop_idle_s:
+            self._stop_recording_and_process(f"말 없음 {s.auto_stop_idle_s}초 · 녹음 자동 멈춤")
+            return
+        if not s.auto_split:
+            return
+        session_end = self._last_speech_end(after=rec.offset_s)
+        if session_end is not None and now - session_end >= s.split_silence_s:
+            self._split_recording(min(now, session_end + 0.5), f"무음 {s.split_silence_s}초")
+
+    def _check_cues(self, segments) -> None:
+        """실시간 전사에서 다음 환자 신호·끝인사를 찾으면 진료를 나눈다."""
+        s = self.settings
+        rec = self._recording_session
+        if not (s.auto_split and rec is not None and self.recorder.active):
+            return
+        next_cues, end_cues = parse_cues(s.split_cues_next), parse_cues(s.split_cues_end)
+        for seg in segments:
+            cue = find_cue(seg.text, next_cues, end_cues)
+            if cue is None:
+                continue
+            boundary = seg.start if cue.kind == "next" else seg.end + 0.2
+            if boundary <= rec.offset_s or boundary > self.recorder.elapsed:
+                continue  # 이미 나뉜 앞 진료의 말
+            if boundary - rec.offset_s < s.min_session_s:
+                continue  # 진료가 너무 짧다 (예: 새 진료 첫머리의 "들어오세요")
+            label = "다음 환자 신호" if cue.kind == "next" else "끝인사"
+            self._split_recording(boundary, f"{label} '{cue.phrase}'")
+            return
+
+    def _split_recording(self, boundary: float, reason: str) -> None:
+        """녹음은 이어 가고, boundary 앞까지를 한 진료로 떼어 전사·요약한다."""
+        rec = self._recording_session
+        if rec is None or not self.recorder.active:
+            return
+        boundary = min(max(boundary, rec.offset_s), self.recorder.elapsed)
+        rate = self.recorder.samplerate
+        audio = self.recorder.snapshot(rec.offset_s, boundary)
+        rec.duration_s = boundary - rec.offset_s
+        rec.end_reason = reason
+        rec.live_clips = [c for c in self.live.clips if rec.offset_s - 0.05 <= c.start < boundary]
+        started = (self._recording_started or datetime.now()) + timedelta(seconds=boundary)
+        nxt = self._create_session(rec.source, boundary, started)
+        nxt.auto_continued = True
+        self._recording_session = nxt
+        self._live_entries.append(LiveEntry(
+            clip_id=-1, start=boundary, status="split",
+            text=f"진료 #{rec.session_id} 끝 ({reason}) → 진료 #{nxt.session_id}",
+        ))
+        self._render_live()
+        self.recorder.discard_before(boundary - LIVE_PAD_S - 1.0)
+        if len(audio) >= 0.3 * max(1, rate):
+            rec.original_rate, rec.original_channels = rate, audio.shape[1]
+            self._start_transcription(rec, source_audio=(audio, rate), auto_summary=self.settings.auto_summarize)
+        else:
+            rec.summary_note, rec.summary_short = "녹음이 너무 짧아 전사하지 않았습니다.", "너무 짧음"
+        if self.session is rec:
+            self._show_session()  # 끝난 진료의 처리 상황을 계속 보여 준다
+        self._set_status(f"진료 #{rec.session_id} 끝 ({reason}) · 진료 #{nxt.session_id} 녹음 중", "recording")
+        self._refresh_controls()
 
     # ------------------------------------------------------- 실시간 전사 미리보기
     def _on_live_event(self, event: str) -> None:
@@ -724,8 +1037,14 @@ class MainWindow(QMainWindow):
     def _live_entry(self, clip_id: int) -> LiveEntry | None:
         return next((e for e in self._live_entries if e.clip_id == clip_id), None)
 
+    def _live_transcription_enabled(self) -> bool:
+        # 미리보기를 꺼도 신호 단어로 진료를 나누려면 실시간 전사가 필요하다.
+        s = self.settings
+        cues = parse_cues(s.split_cues_next) or parse_cues(s.split_cues_end)
+        return self.live_check.isChecked() or (s.auto_split and bool(cues))
+
     def _ensure_live_runner(self) -> WhisperRunner | None:
-        if not self.live_check.isChecked():
+        if not self._live_transcription_enabled():
             return None
         if self._live_runner is None and self._live_issue is None:
             runner = self._whisper_runner()
@@ -737,9 +1056,9 @@ class MainWindow(QMainWindow):
         return self._live_runner
 
     def _close_live_clip(self, clip_id: int) -> None:
-        clip: LiveClip = self.live.clips[clip_id]
+        clip = self.live.clips[clip_id]
         entry = self._live_entry(clip_id)
-        if entry is None or self.session is None:
+        if entry is None:
             return
         entry.end = clip.end
         runner = self._ensure_live_runner()
@@ -753,12 +1072,12 @@ class MainWindow(QMainWindow):
             return
         entry.status = "pending"
         self.live_transcriber.submit(
-            self.session.session_id, clip_id, offset, audio, self.recorder.samplerate, runner, self._vad_params()
+            self._recording_id, clip_id, offset, audio, self.recorder.samplerate, runner, self._vad_params()
         )
 
     @Slot(int, int, object, object)
-    def _on_live_result(self, session_id: int, clip_id: int, segments, error) -> None:
-        if self.session is None or session_id != self.session.session_id:
+    def _on_live_result(self, recording_id: int, clip_id: int, segments, error) -> None:
+        if recording_id != self._recording_id:
             return
         entry = self._live_entry(clip_id)
         if entry is None:
@@ -770,23 +1089,28 @@ class MainWindow(QMainWindow):
         else:
             entry.status, entry.text = "done", " ".join(s.text for s in segments)
         self._render_live()
+        if segments:
+            self._check_cues(segments)
 
     def _render_live(self) -> None:
         note = (
             '<p style="color:#6b7280;">실시간 미리보기 · 말이 끊길 때마다 그 부분만 whisper.cpp 로 전사합니다(이 Mac). '
-            "앞뒤 문맥 없이 짧게 전사해 정확도가 낮을 수 있으며, 녹음을 끝내면 전체 녹음으로 다시 전사한 결과가 "
+            "앞뒤 문맥 없이 짧게 전사해 정확도가 낮을 수 있으며, 진료가 끝나면 그 진료 녹음 전체로 다시 전사한 결과가 "
             "'전사문' 탭에 나옵니다.</p>"
         )
         rows = [note]
         if self._live_issue:
             rows.append(f'<p style="color:#b91c1c;">{html.escape(self._live_issue)}</p>')
         if not self.live_check.isChecked():
-            rows.append('<p style="color:#9a3412;">실시간 전사 미리보기가 꺼져 있습니다. 녹음 종료 후 전사만 합니다.</p>')
+            rows.append('<p style="color:#9a3412;">실시간 전사 미리보기가 꺼져 있습니다.</p>')
         if not self._live_entries:
             message = ("말을 하면 여기에 바로 나타납니다…" if self.recorder.active
-                       else "‘● 녹음 시작’을 누르고 말하면, 말이 끊길 때마다 그 부분이 여기에 바로 전사됩니다.")
+                       else "‘● 녹음 시작’(또는 스페이스바)을 누르고 말하면, 말이 끊길 때마다 그 부분이 여기에 바로 전사됩니다.")
             rows.append(f'<p style="color:#6b7280;">{message}</p>')
         for entry in self._live_entries:
+            if entry.status == "split":
+                rows.append(f'<p style="color:#6b7280;border-top:1px solid #d4d4d8;">── {html.escape(entry.text)} ──</p>')
+                continue
             end = f" → {format_time(entry.end)}" if entry.end is not None else ""
             stamp = f'<span style="color:#6b7280;font-family:Menlo;">[{format_time(entry.start)}{end}]</span>'
             body = {
@@ -803,7 +1127,7 @@ class MainWindow(QMainWindow):
 
     def _on_live_toggled(self, checked: bool) -> None:
         self.settings.live_preview = checked
-        if not checked:
+        if not self._live_transcription_enabled():
             self.live_transcriber.cancel_all()
             for entry in self._live_entries:
                 if entry.status == "pending":
@@ -820,31 +1144,47 @@ class MainWindow(QMainWindow):
         self._render_live()
 
     # ------------------------------------------------------------ 녹음 종료
-    def _stop_recording_and_process(self) -> None:
+    def _stop_recording_and_process(self, reason: str = "직접 종료") -> None:
         self._rec_timer.stop()
-        session = self.session
+        rec = self._recording_session
+        self.recorder.drain()
+        end = self.recorder.elapsed
+        rate = self.recorder.samplerate
+        audio = self.recorder.snapshot(rec.offset_s, end) if rec is not None else None
         try:
-            audio, samplerate = self.recorder.stop()
+            self.recorder.stop(keep_audio=False)
         except Exception as exc:
             self._show_error(f"녹음을 정상적으로 끝내지 못했습니다: {exc}")
-            self._refresh_controls()
-            return
+        self._recording_session = None
         self.level_meter.set_level(-120.0)
+        self.simple.level.set_level(-120.0)
         self.live_indicator.setText("")
         if self.live.clips and self.live.clips[-1].end is None:
             self.live.clips[-1].end = self.live.time
-        if session is not None:
-            session.live_clips = list(self.live.clips)
         self._stop_live_preview()
-        duration = len(audio) / max(1, samplerate)
-        self.pipeline.set_step("record", "done", f"{_mmss(duration)} 녹음")
-        if session is None or len(audio) < 0.3 * max(1, samplerate):
-            self._set_status("녹음이 너무 짧아 전사하지 않았습니다.", "warn")
-            self.pipeline.set_step("transcribe", "skipped", "녹음이 너무 짧음")
+        if rec is None:
             self._refresh_controls()
             return
-        session.original_rate, session.original_channels = samplerate, audio.shape[1]
-        self._start_transcription(source_audio=(audio, samplerate), auto_summary=self.settings.auto_summarize)
+        rec.duration_s = max(0.0, end - rec.offset_s)
+        rec.end_reason = reason
+        rec.live_clips = [c for c in self.live.clips if c.start >= rec.offset_s - 0.05]
+        if rec.auto_continued and not rec.live_clips:
+            # 자동 나누기로 이어진 뒤 아무 말도 없던 진료는 기록에 남기지 않는다.
+            self.sessions.remove(rec)
+            if self.session is rec:
+                self._select_session(self.sessions[-1] if self.sessions else None)
+            self._set_status(f"녹음을 멈췄습니다 ({reason})", "idle")
+            self._refresh_controls()
+            return
+        if audio is None or len(audio) < 0.3 * max(1, rate):
+            rec.summary_note, rec.summary_short = "녹음이 너무 짧아 전사하지 않았습니다.", "너무 짧음"
+            self._set_status("녹음이 너무 짧아 전사하지 않았습니다.", "warn")
+            self._show_session()
+            return
+        rec.original_rate, rec.original_channels = rate, audio.shape[1]
+        if reason != "직접 종료":
+            self._set_status(f"녹음을 멈췄습니다 ({reason})", "warn")
+        self._start_transcription(rec, source_audio=(audio, rate), auto_summary=self.settings.auto_summarize)
 
     def _on_cancel_recording(self) -> None:
         if not self.recorder.active:
@@ -852,14 +1192,18 @@ class MainWindow(QMainWindow):
         self._rec_timer.stop()
         self.recorder.abort()
         self.live_transcriber.cancel_all()
+        rec, self._recording_session = self._recording_session, None
+        if rec is not None and rec in self.sessions:
+            self.sessions.remove(rec)
         self.level_meter.set_level(-120.0)
+        self.simple.level.set_level(-120.0)
         self.elapsed_label.setText("00:00")
+        self.simple.elapsed.setText("00:00")
         self.live_indicator.setText("")
         self.waveform.clear()
         self.timeline.clear()
-        self.pipeline.reset()
         self._live_entries = []
-        self.session = None
+        self.session = self.sessions[-1] if self.sessions else None
         self._show_session()
         self._render_live()
         self._set_status("녹음을 취소했습니다 (마이크 해제)", "warn")
@@ -875,13 +1219,18 @@ class MainWindow(QMainWindow):
             self.open_audio_file(Path(path))
 
     def open_audio_file(self, path: Path, confirm: bool = True) -> None:
+        """파일을 새 진료로 추가해 전사·요약한다. 이전 진료의 처리는 그대로 이어진다."""
         if self.recorder.active:
             return
-        if confirm and not self._confirm_new_session():
-            return
-        self._new_session(source=f"파일 · {path.name}")
-        self.pipeline.set_step("record", "done", f"파일 · {path.name}")
-        self._start_transcription(source_path=path, auto_summary=self.settings.auto_summarize)
+        session = self._create_session(f"파일 · {path.name}")
+        self._live_entries = []
+        self.waveform.clear()
+        self.simple.collapse_results()
+        self._clear_error()
+        self._set_status("대기 중", "idle")
+        self._select_session(session)
+        self._render_live()
+        self._start_transcription(session, source_path=path, auto_summary=self.settings.auto_summarize)
 
     # ---------------------------------------------------------------- 전사
     def _vad_params(self) -> VadParams:
@@ -914,10 +1263,8 @@ class MainWindow(QMainWindow):
             )
         )
 
-    def _start_transcription(self, *, source_audio=None, source_path: Path | None = None, auto_summary: bool) -> None:
-        session = self.session
-        if session is None:
-            return
+    def _start_transcription(self, session: Session, *, source_audio=None, source_path: Path | None = None,
+                             auto_summary: bool) -> None:
         use_vad = self.vad_check.isChecked()
         params = self._vad_params()
         runner = self._whisper_runner()
@@ -935,188 +1282,215 @@ class MainWindow(QMainWindow):
                 del data
             return runner.transcribe(session.pcm16, use_vad=use_vad, params=params, cancel=cancel)
 
-        self._transcribe_task = self.tasks.start(job, work)
-        self.pipeline.set_step("transcribe", "active", "처리 중…")
-        if auto_summary:
-            self.pipeline.set_step("summary", "idle")
-            self.pipeline.set_step("review", "idle")
-        self._clear_error()
+        session.transcribe_error = None
+        self._tasks[(session.session_id, "transcribe")] = self.tasks.start(job, work)
+        if session is self.session:
+            self._clear_error()
         self._refresh_controls()
 
     def _on_retranscribe(self) -> None:
-        if self.session is None or self.session.pcm16 is None:
+        s = self.session
+        if s is None or s.pcm16 is None or (s is self._recording_session and self.recorder.active):
             return
-        self._start_transcription(auto_summary=False)
+        self._start_transcription(s, auto_summary=False)
 
     def _on_cancel_tasks(self) -> None:
-        for key, task in (("transcribe", self._transcribe_task), ("summary", self._summary_task)):
-            if task is not None:
-                self.pipeline.set_step(key, "skipped", "취소함")
-        self._cancel_tasks()
+        if self.session is None:
+            return
+        self._cancel_session_tasks(self.session)
         self._set_status("처리를 취소했습니다. 전사문·녹음은 남아 있습니다.", "warn")
         self._show_draft()
-        self._refresh_controls()
 
     @Slot(object, object, object)
     def _on_task_finished(self, task: Task, result, error) -> None:
-        if task is self._transcribe_task:
-            self._transcribe_task = None
-        if task is self._summary_task:
-            self._summary_task = None
         job = task.job
-        stale = self.session is None or job.session_id != self.session.session_id or task.cancel.is_set()
-        if not stale:
-            if job.kind == "transcribe":
-                self._on_transcribed(job, task, result, error)
-            else:
-                self._on_summarized(job, task, result, error)
+        key = (job.session_id, job.kind)
+        if self._tasks.get(key) is task:
+            del self._tasks[key]
+        session = self._session_by_id(job.session_id)
+        if session is None or task.cancel.is_set():
+            self._refresh_controls()
+            return
+        if job.kind == "transcribe":
+            self._on_transcribed(session, job, task, result, error)
+        else:
+            self._on_summarized(session, job, task, result, error)
         self._refresh_controls()
-        if not stale:
-            self.activity_finished.emit(job.kind)
+        self.activity_finished.emit(job.kind)
 
-    def _on_transcribed(self, job: Job, task: Task, result: TranscriptionResult | None, error) -> None:
-        session = self.session
+    def _on_transcribed(self, session: Session, job: Job, task: Task, result: TranscriptionResult | None, error) -> None:
+        shown = session is self.session
         if error is not None:
             if isinstance(error, procutil.Cancelled):
-                self._set_status("전사를 취소했습니다.", "warn")
-                self.pipeline.set_step("transcribe", "skipped", "취소함")
+                if shown:
+                    self._set_status("전사를 취소했습니다.", "warn")
                 return
             if isinstance(error, (WhisperError, AudioFileError)):
                 message = str(error)
             else:
                 message = f"전사 중 예기치 못한 오류: {type(error).__name__}: {error}"
-            self._show_error(message + "\n녹음은 남아 있으니 문제를 고친 뒤 '같은 녹음 다시 전사'를 누르세요."
-                             if session.pcm16 is not None else message)
-            self._set_status("전사 실패", "error")
-            self.pipeline.set_step("transcribe", "error", "실패 · 위 안내 참고")
-            self._refresh_controls()
+            if session.pcm16 is not None:
+                message += "\n녹음은 남아 있으니 문제를 고친 뒤 '같은 녹음 다시 전사'를 누르세요."
+            session.transcribe_error = message
+            if shown:
+                self._show_error(message)
+                self._set_status("전사 실패", "error")
             return
         run = TranscriptRun(job.run_id, result)
         session.runs.append(run)
-        regions = f" · 구간 {len(result.regions)}개" if result.regions is not None else ""
-        self.pipeline.set_step("transcribe", "done", f"{task.elapsed:.1f}초 · 문장 {len(result.segments)}개{regions}")
-        self._show_session()
-        if len(session.runs) == 1:  # 녹음·불러오기 직후 첫 전사: 실시간 미리보기 대신 최종 전사를 보여 준다
-            self.tabs.setCurrentWidget(self.transcript_view)
+        session.transcribe_seconds = task.elapsed
+        if shown:
+            self._show_session()
+            if len(session.runs) == 1 and not self.recorder.active:
+                self.tabs.setCurrentWidget(self.transcript_view)  # 실시간 미리보기 대신 최종 전사
         if not job.auto_summary:
-            self._set_status(f"전사 완료 · {result.elapsed:.1f}초 · {len(result.segments)}개 문장", "done")
+            if shown:
+                self._set_status(f"전사 완료 · {result.elapsed:.1f}초 · {len(result.segments)}개 문장", "done")
             return
         blocked = self._summary_block_reason(run)
         if blocked:
-            reason, short = blocked
-            session.summary_note = reason
-            self.pipeline.set_step("summary", "skipped", short)
-            self._show_draft()
-            self._set_status(f"전사 완료 · {reason}", "warn")
+            session.summary_note, session.summary_short = blocked
+            if shown:
+                self._show_draft()
+                self._set_status(f"전사 완료 · {blocked[0]}", "warn")
             return
-        self._start_summary(run)
+        self._start_summary(session, run)
 
     def _summary_block_reason(self, run: TranscriptRun) -> tuple[str, str] | None:
-        """(화면 안내, 진행 단계용 짧은 표시). 요약을 요청하지 않을 이유가 없으면 None."""
+        """(화면 안내, 짧은 표시). 요약을 요청하지 않을 이유가 없으면 None."""
         r = run.result
         if r.no_speech_detected:
-            return "음성이 감지되지 않아 요약을 요청하지 않았습니다.", "음성 없음 · 요청 안 함"
+            return "음성이 감지되지 않아 요약을 요청하지 않았습니다.", "음성 없음"
         if r.is_empty:
-            return "전사된 발화가 없어 요약을 요청하지 않았습니다.", "전사 없음 · 요청 안 함"
+            return "전사된 발화가 없어 요약을 요청하지 않았습니다.", "전사 없음"
         if not self.settings.claude_cli_path():
             return ("Claude Code CLI(claude)를 찾지 못해 요약하지 않았습니다. 설정에서 경로를 지정하세요.",
                     "claude 없음")
         return None
 
     # ---------------------------------------------------------------- 요약
+    def _summary_mode(self) -> str:
+        return self.summary_mode_combo.currentData() or "general"
+
+    def _refresh_draft_title(self) -> None:
+        general = self._summary_mode() == "general"
+        self.draft_title.setText("주요 내용 요약" if general else "차트 초안 (검토용 초안)")
+        self.evidence_check.setVisible(not general)  # 근거 문장은 진료 차트 초안에만 있다
+
+    def _on_summary_mode_changed(self, _i: int) -> None:
+        self.settings.summary_mode = self._summary_mode()
+        self._refresh_draft_title()
+        self._show_draft()
+
     def _on_summary_clicked(self) -> None:
         run = self._current_run()
-        if run is None or run.result.is_empty:
+        if self.session is None or run is None or run.result.is_empty:
             return
         if run.result.no_speech_detected and not self._confirm(
             "요약 요청", "VAD 가 음성을 찾지 못한 녹음입니다. 전사문이 무음에서 생긴 환각일 수 있습니다. 그래도 요약을 요청할까요?"
         ):
             return
-        self._start_summary(run)
+        self._start_summary(self.session, run)
 
-    def _start_summary(self, run: TranscriptRun) -> None:
-        session = self.session
+    def _start_summary(self, session: Session, run: TranscriptRun) -> None:
         s = self.settings
+        mode = self._summary_mode()
         cfg = ClaudeConfig(
             cli=s.claude_cli_path(),
             model=s.claude_model.strip() or DEFAULT_CLAUDE_MODEL,
             timeout_s=s.claude_timeout_s,
             effort=s.claude_effort,
+            mode=mode,
         )
         segments = run.result.segments
-        based_on = run.label
+        based_on = f"진료 #{session.session_id} · {run.label}"
 
-        def work(cancel) -> ChartDraft:
+        def work(cancel) -> ChartDraft | ConversationSummary:
             structured, _meta = summarize(segments, cfg, cancel)
+            kind = ConversationSummary if mode == "general" else ChartDraft
             try:
-                draft = ChartDraft.from_structured(structured, model=cfg.model, based_on=based_on)
+                draft = kind.from_structured(structured, model=cfg.model, based_on=based_on)
             except ValueError as exc:
-                raise SummaryError("parse", f"Claude 응답이 차트 초안 형식과 다릅니다: {exc} 다시 시도하세요.") from exc
-            verify_draft(draft, segments)
+                raise SummaryError("parse", f"Claude 응답이 {kind.kind_label} 형식과 다릅니다: {exc} 다시 시도하세요.") from exc
+            if isinstance(draft, ChartDraft):
+                verify_draft(draft, segments)
             return draft
 
         session.summary_error = None
         session.summary_note = None
-        self._summary_task = self.tasks.start(Job("summary", session.session_id, run.run_id), work)
-        self.pipeline.set_step("summary", "active", "Claude 응답 대기…")
-        self.pipeline.set_step("review", "idle")
-        self._show_draft()
+        session.summary_short = None
+        self._tasks[(session.session_id, "summary")] = self.tasks.start(
+            Job("summary", session.session_id, run.run_id), work
+        )
+        if session is self.session:
+            self._show_draft()
         self._refresh_controls()
 
-    def _on_summarized(self, job: Job, task: Task, draft: ChartDraft | None, error) -> None:
-        session = self.session
+    def _on_summarized(self, session: Session, job: Job, task: Task, draft, error) -> None:
+        shown = session is self.session
         if error is not None:
             if isinstance(error, SummaryError) and error.kind == "cancelled":
-                session.summary_note = "요약을 취소했습니다."
-                self._set_status("요약 취소 · 전사문은 그대로 있습니다", "warn")
-                self.pipeline.set_step("summary", "skipped", "취소함")
+                session.summary_note, session.summary_short = "요약을 취소했습니다.", "요약 취소"
+                if shown:
+                    self._set_status("요약 취소 · 전사문은 그대로 있습니다", "warn")
             else:
                 session.summary_error = (
                     str(error) if isinstance(error, SummaryError) else f"요약 중 예기치 못한 오류: {type(error).__name__}"
                 )
-                self._set_status("요약 실패 · 전사문은 그대로 있습니다", "warn")
-                self.pipeline.set_step("summary", "error", "실패 · '요약 다시 시도' 가능")
+                if shown:
+                    self._set_status("요약 실패 · 전사문은 그대로 있습니다", "warn")
         else:
             session.draft = draft
             session.draft_run_id = job.run_id
-            self._set_status("완료 · 검토용 차트 초안을 확인하세요", "done")
-            self.pipeline.set_step("summary", "done", f"{task.elapsed:.1f}초")
-            self.pipeline.set_step("review", "active", "검토용 초안 확인")
-        self._show_draft()
+            session.summary_seconds = task.elapsed
+            if shown:
+                self._set_status(f"완료 · {draft.kind_label} 준비됨", "done")
+        if shown:
+            self._show_draft()
 
     def _show_draft(self) -> None:
         s = self.session
         if s is not None and s.summary_error:
             self.summary_error_label.setText(f"요약 실패: {s.summary_error}\n전사문은 그대로 있습니다. '요약 다시 시도'로 같은 전사문을 다시 요약할 수 있습니다.")
             self.summary_error_label.show()
+            self.simple.set_error(f"요약 실패: {s.summary_error.splitlines()[0]}  (대화 내용은 남아 있습니다)", warn=True)
         else:
             self.summary_error_label.hide()
+            if self.simple.error.text().startswith("요약 실패"):
+                self.simple.set_error(None)
         if s is not None and s.draft is not None:
             run = s.run(s.draft_run_id)
-            self.draft_basis_label.setText(f"요약 기준: {run.label if run else s.draft.based_on}")
-            self.draft_view.setHtml(s.draft.to_html(include_evidence=self.evidence_check.isChecked()))
+            basis = f"요약 기준: 진료 #{s.session_id} · {run.label if run else s.draft.based_on} · {s.draft.kind_label}"
+            if isinstance(s.draft, ConversationSummary) != (self._summary_mode() == "general"):
+                basis += " — 요약 종류를 바꿨습니다. '요약 다시 시도'를 누르면 같은 전사문으로 다시 요약합니다."
+            self.draft_basis_label.setText(basis)
+            content = s.draft.to_html(include_evidence=self.evidence_check.isChecked())
+            self.draft_view.setHtml(content)
+            self.simple.summary_view.setHtml(content)
         else:
             self.draft_basis_label.setText("")
-            if self._summary_task is not None:
+            if self._task(s, "summary") is not None:
                 message = "요약 중… Claude 응답을 기다리고 있습니다. 전사문은 왼쪽에서 바로 확인할 수 있습니다."
             elif s is not None and s.summary_note:
                 message = s.summary_note
             else:
                 message = DRAFT_PLACEHOLDER
-            self.draft_view.setHtml(f'<p style="color:#6b7280;">{html.escape(message)}</p>')
+            placeholder = f'<p style="color:#6b7280;">{html.escape(message)}</p>'
+            self.draft_view.setHtml(placeholder)
+            self.simple.summary_view.setHtml(placeholder)
         self._refresh_controls()
 
     def _on_copy(self) -> None:
         if self.session is None or self.session.draft is None:
             return
         QGuiApplication.clipboard().setText(self.session.draft.to_text(include_evidence=self.evidence_check.isChecked()))
-        self._set_status("검토용 초안을 클립보드에 복사했습니다", "done")
+        self._set_status(f"진료 #{self.session.session_id} 요약을 클립보드에 복사했습니다", "done")
 
     def _on_export(self) -> None:
         s = self.session
         if s is None or not s.has_results:
             return
-        default = Path.home() / "Documents" / f"clinic-scribe-{s.created_at:%Y%m%d-%H%M}.md"
+        default = Path.home() / "Documents" / f"clinic-scribe-{s.created_at:%Y%m%d-%H%M}-{s.session_id}.md"
         path, _ = QFileDialog.getSaveFileName(self, "결과 내보내기", str(default), "Markdown (*.md)")
         if not path:
             return
@@ -1132,20 +1506,26 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 결과 표시
     def _show_run(self, run: TranscriptRun | None) -> None:
-        self.transcript_view.setHtml(self._transcript_html(run))
+        content = self._transcript_html(run)
+        self.transcript_view.setHtml(content)
+        self.simple.transcript_view.setHtml(content)
         self._fill_regions(run)
-        if run is not None and not self.recorder.active:
-            regions = [(r.start, r.end) for r in run.result.regions or []]
-            self.timeline.set_data(run.result.audio_duration, regions, live=False)
+        if not self.recorder.active:
+            if run is not None:
+                self.timeline.set_data(run.result.audio_duration, [(r.start, r.end) for r in run.result.regions or []], live=False)
+            else:
+                self.timeline.clear()
 
     def _transcript_html(self, run: TranscriptRun | None) -> str:
         if run is None:
-            if self._transcribe_task is not None:
+            if self._task(self.session, "transcribe") is not None:
                 return '<p style="color:#6b7280;">전사 중…</p>'
+            if self.session is not None and self.session is self._recording_session and self.recorder.active:
+                return '<p style="color:#6b7280;">녹음 중입니다. 진료가 끝나면 이 진료 녹음 전체를 전사해 여기에 보여 줍니다.</p>'
             return '<p style="color:#6b7280;">녹음을 마치거나 오디오 파일을 불러오면 타임스탬프가 있는 전사문이 표시됩니다.</p>'
         r = run.result
         head = (f'<p style="color:#6b7280;">{html.escape(run.label)} · 녹음 {format_time(r.audio_duration)} · '
-                f"처리 {r.elapsed:.1f}초 · 시각은 원본 녹음 기준</p>")
+                f"처리 {r.elapsed:.1f}초 · 시각은 이 진료 녹음 기준</p>")
         if not r.segments:
             note = "음성이 감지되지 않았습니다." if r.no_speech_detected else "전사된 발화가 없습니다."
             return head + f'<p style="color:#6b7280;">{note}</p>'
@@ -1178,7 +1558,7 @@ class MainWindow(QMainWindow):
                 self.regions_info.setText(f"음성이 감지되지 않았습니다 (Silero VAD · {p.describe()}).")
             elif r.vad_enabled:
                 self.regions_info.setText(
-                    f"Silero VAD 음성 구간 {len(r.regions)}개 · {p.describe()} · 시각은 원본 녹음 기준. "
+                    f"Silero VAD 음성 구간 {len(r.regions)}개 · {p.describe()} · 시각은 이 진료 녹음 기준. "
                     f"{p.min_silence_ms}ms 보다 짧은 쉼은 한 구간으로 합쳐집니다. 구간을 재생해 첫소리·끝소리가 잘렸는지 확인하세요."
                 )
             else:
@@ -1237,13 +1617,15 @@ class MainWindow(QMainWindow):
             self.settings.save()
             self._live_runner = None  # 바뀐 경로로 다시 만든다
             self._live_issue = None
+            self.summary_mode_combo.setCurrentIndex(max(0, self.summary_mode_combo.findData(self.settings.summary_mode)))
             self._refresh_tool_status()
+            self._refresh_auto_split_note()
 
     # -------------------------------------------------------------- 종료
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        s = self.session
-        if s is not None and s.has_results and not s.exported and not self._confirm(
-            "종료", "내보내지 않은 전사·요약 결과가 있습니다. 종료하면 사라집니다. 종료할까요?"
+        unexported = [s for s in self.sessions if s.has_results and not s.exported]
+        if unexported and not self._confirm(
+            "종료", f"내보내지 않은 진료 결과가 {len(unexported)}건 있습니다. 종료하면 사라집니다. 종료할까요?"
         ):
             event.ignore()
             return
@@ -1252,11 +1634,16 @@ class MainWindow(QMainWindow):
 
     def shutdown(self) -> None:
         """마이크를 놓고, 진행 중인 외부 프로세스를 끝내고, 설정을 저장한다."""
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         self._rec_timer.stop()
         if self.recorder.active:
             self.recorder.abort()
         self.live_transcriber.close()
-        self._cancel_tasks()
+        for task in self._tasks.values():
+            task.cancel.set()
+        self._tasks.clear()
         procutil.terminate_all()
         self._stop_playback()
         self.settings.show_evidence = self.evidence_check.isChecked()

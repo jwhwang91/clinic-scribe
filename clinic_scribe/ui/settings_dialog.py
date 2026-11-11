@@ -17,7 +17,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from clinic_scribe.config import CLAUDE_EFFORT_CHOICES, DEFAULT_CLAUDE_MODEL, Settings, default_model_dir, settings_path
+from clinic_scribe.config import (
+    CLAUDE_EFFORT_CHOICES,
+    DEFAULT_CLAUDE_MODEL,
+    SUMMARY_MODES,
+    Settings,
+    default_model_dir,
+    settings_path,
+)
 from clinic_scribe.ui.widgets import PathField
 
 
@@ -63,11 +70,44 @@ class SettingsDialog(QDialog):
         self.claude_timeout.setValue(s.claude_timeout_s)
         self.auto_summary = QCheckBox("전사가 끝나면 자동으로 요약 요청")
         self.auto_summary.setChecked(s.auto_summarize)
+        self.summary_mode = QComboBox()
+        for mode, label in SUMMARY_MODES.items():
+            self.summary_mode.addItem(label, mode)
+        self.summary_mode.setCurrentIndex(max(0, self.summary_mode.findData(s.summary_mode)))
         cf.addRow("claude 실행 파일", self.claude_cli)
         cf.addRow("모델", self.claude_model)
         cf.addRow("effort", self.claude_effort)
         cf.addRow("제한 시간", self.claude_timeout)
+        cf.addRow("요약 종류", self.summary_mode)
         cf.addRow("", self.auto_summary)
+
+        split_box = QGroupBox("자동 진료 나누기 (스페이스바로 끝내는 것을 깜빡했을 때)")
+        sf = QFormLayout(split_box)
+        self.auto_split = QCheckBox("긴 침묵이나 다음 환자 신호에서 진료를 끝내고 다음 진료로 넘어가기 (녹음은 계속)")
+        self.auto_split.setChecked(s.auto_split)
+        self.split_silence = QSpinBox()
+        self.split_silence.setRange(10, 3600)
+        self.split_silence.setSuffix(" 초")
+        self.split_silence.setValue(s.split_silence_s)
+        self.cues_next = QLineEdit(s.split_cues_next)
+        self.cues_next.setToolTip("쉼표로 구분. 이 말이 나오면 그 말부터 새 진료로 봅니다. 띄어쓰기는 무시합니다.")
+        self.cues_end = QLineEdit(s.split_cues_end)
+        self.cues_end.setToolTip("쉼표로 구분. 이 말이 나오면 그 말까지를 앞 진료로 봅니다. 띄어쓰기는 무시합니다.")
+        self.min_session = QSpinBox()
+        self.min_session.setRange(0, 600)
+        self.min_session.setSuffix(" 초")
+        self.min_session.setValue(s.min_session_s)
+        self.auto_stop = QSpinBox()
+        self.auto_stop.setRange(0, 7200)
+        self.auto_stop.setSuffix(" 초")
+        self.auto_stop.setSpecialValueText("끄기")
+        self.auto_stop.setValue(s.auto_stop_idle_s)
+        sf.addRow("", self.auto_split)
+        sf.addRow("침묵 기준", self.split_silence)
+        sf.addRow("다음 환자 신호", self.cues_next)
+        sf.addRow("끝인사", self.cues_end)
+        sf.addRow("최소 진료 길이", self.min_session)
+        sf.addRow("녹음 자동 멈춤 (말 없음)", self.auto_stop)
 
         info = QLabel(f"설정 파일: {settings_path()}\n모델 기본 폴더: {default_model_dir()}")
         info.setStyleSheet("color: gray;")
@@ -79,6 +119,7 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(whisper_box)
         layout.addWidget(claude_box)
+        layout.addWidget(split_box)
         layout.addWidget(info)
         layout.addWidget(buttons)
 
@@ -95,3 +136,10 @@ class SettingsDialog(QDialog):
         s.claude_effort = self.claude_effort.currentData() or ""
         s.claude_timeout_s = self.claude_timeout.value()
         s.auto_summarize = self.auto_summary.isChecked()
+        s.summary_mode = self.summary_mode.currentData() or "general"
+        s.auto_split = self.auto_split.isChecked()
+        s.split_silence_s = self.split_silence.value()
+        s.split_cues_next = self.cues_next.text().strip()
+        s.split_cues_end = self.cues_end.text().strip()
+        s.min_session_s = self.min_session.value()
+        s.auto_stop_idle_s = self.auto_stop.value()

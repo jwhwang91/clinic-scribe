@@ -12,7 +12,7 @@ from tests.helpers import load_pcm
 
 pytestmark = pytest.mark.models
 
-SPEECH_FILES = ["mock_consult_short.wav", "mock_consult.wav", "long_pause.wav", "injection.wav"]
+SPEECH_FILES = ["mock_consult_short.wav", "mock_consult.wav", "long_pause.wav", "injection.wav", "daily_chat.wav"]
 
 
 def regions_for(runner, pcm, params):
@@ -66,6 +66,18 @@ def test_transcript_keeps_original_timeline(whisper_runner, settings, samples, m
     for s in result.segments:
         region = result.regions[s.region]
         assert region.start - 0.01 <= s.start and s.end <= result.regions[s.last_region].end + 0.01
+
+
+def test_everyday_conversation_is_transcribed_sentence_by_sentence(whisper_runner, settings, samples):
+    """진료와 관계없는 일상 대화도 빠짐없이, 문장별로 나뉘어 전사된다.
+
+    예전 기본 힌트("…처방이 나오는 한국어 진료 대화.")에서는 24초 일상 대화가 한 줄로 뭉쳤다.
+    """
+    result = whisper_runner.transcribe(load_pcm(samples / "daily_chat.wav"), use_vad=True, params=settings.vad)
+    text = " ".join(s.text for s in result.segments)
+    for word in ("날씨", "주말", "한강", "자전거", "치킨", "잠을", "쉬세요"):
+        assert word in text
+    assert len(result.segments) >= 4
 
 
 def test_mock_consult_short_transcription(whisper_runner, settings, samples):

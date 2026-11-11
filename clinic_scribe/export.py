@@ -6,16 +6,18 @@ from pathlib import Path
 
 from clinic_scribe.audio import write_wav
 from clinic_scribe.chart import REVIEW_BANNER, ChartDraft
+from clinic_scribe.conversation_summary import GENERAL_BANNER, ConversationSummary
 from clinic_scribe.session import Session, TranscriptRun
 from clinic_scribe.whisper import format_time
 
 
-def build_markdown(session: Session, run: TranscriptRun | None, draft: ChartDraft | None,
+def build_markdown(session: Session, run: TranscriptRun | None, draft: ChartDraft | ConversationSummary | None,
                    include_evidence: bool = True) -> str:
+    banner = GENERAL_BANNER if isinstance(draft, ConversationSummary) else REVIEW_BANNER
     lines = [
         "# clinic-scribe 기록 (검토용 초안)",
         "",
-        f"> {REVIEW_BANNER}",
+        f"> {banner}",
         "",
         f"- 세션: {session.created_at:%Y-%m-%d %H:%M} · {session.source}",
     ]
@@ -23,7 +25,7 @@ def build_markdown(session: Session, run: TranscriptRun | None, draft: ChartDraf
         r = run.result
         lines.append(f"- 전사: {run.label} · 녹음 길이 {format_time(r.audio_duration)}")
     lines.append("")
-    lines.append("## 차트 초안")
+    lines.append(f"## {draft.kind_label if draft is not None else '요약'}")
     lines.append("")
     if draft is not None:
         lines.append("```text")
