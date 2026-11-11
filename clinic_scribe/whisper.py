@@ -61,6 +61,8 @@ class TranscriptSegment:
     speech_detected: bool = True  # False: VAD 가 음성을 찾지 못한 곳의 전사(환각 의심)
     uncertain_terms: list[str] = field(default_factory=list)  # 확률이 낮은 숫자·영문 단어
     speaker: str | None = None  # 말한 사람: 등록한 의사 이름 / "환자"(등록되지 않은 목소리) / None(판단 안 함)
+    original_text: str | None = None  # 딕션 사전으로 고치기 전 Whisper 가 받아 적은 그대로 (고친 줄만)
+    corrections: list[str] = field(default_factory=list)  # 적용한 교정 ("잘못 들린 말 → 바른 말")
 
 
 @dataclass
@@ -71,6 +73,7 @@ class TranscriptionResult:
     vad_params: VadParams
     audio_duration: float
     elapsed: float
+    doctor: str | None = None  # 이 진료 의사로 보고 그 의사의 딕션 사전(용어 목록)을 쓴 경우
 
     @property
     def is_empty(self) -> bool:
@@ -254,7 +257,9 @@ class WhisperRunner:
         use_vad: bool,
         params: VadParams,
         cancel: threading.Event | None = None,
+        prompt: str | None = None,
     ) -> TranscriptionResult:
+        """prompt 를 주면 설정의 힌트 프롬프트 대신 쓴다 (의사별 용어 목록을 넣은 힌트)."""
         issues = self.problems(need_vad=use_vad)
         if issues:
             raise WhisperError("\n".join(issues))
@@ -268,7 +273,7 @@ class WhisperRunner:
             if use_vad and regions == []:
                 segments: list[TranscriptSegment] = []  # 음성 없음: Whisper 를 돌리지 않는다
             else:
-                segments = self._run_whisper(wav, tmp / "out", use_vad, params, cancel)
+                segments = self._run_whisper(wav, tmp / "out", use_vad, params, cancel, prompt)
             assign_regions(segments, regions, use_vad)
             return TranscriptionResult(
                 segments=segments,
@@ -282,7 +287,8 @@ class WhisperRunner:
             shutil.rmtree(tmp, ignore_errors=True)
 
     def _run_whisper(
-        self, wav: Path, out_base: Path, use_vad: bool, params: VadParams, cancel: threading.Event | None
+        self, wav: Path, out_base: Path, use_vad: bool, params: VadParams, cancel: threading.Event | None,
+        prompt: str | None = None,
     ) -> list[TranscriptSegment]:
         cfg = self.config
         cmd = [
@@ -291,8 +297,9 @@ class WhisperRunner:
             "-t", str(cfg.threads or default_threads()),
             "-oj", "-ojf", "-of", str(out_base),
         ]
-        if cfg.prompt.strip():
-            cmd += ["--prompt", cfg.prompt.strip()]
+        hint = (cfg.prompt if prompt is None else prompt).strip()
+        if hint:
+            cmd += ["--prompt", hint]
         if use_vad:
             cmd += ["--vad", "-vm", str(cfg.vad_model), *vad_args(params)]
         result = procutil.run(cmd, capture_stdout=False, cancel=cancel)

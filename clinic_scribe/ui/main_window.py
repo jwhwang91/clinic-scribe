@@ -52,8 +52,9 @@ from clinic_scribe import mic_permission, procutil
 from clinic_scribe.audio import WHISPER_SR, AudioFileError, load_audio_file, pcm_slice, rms_dbfs, to_mono, to_whisper_pcm
 from clinic_scribe.auto_split import find_cue, parse_cues
 from clinic_scribe.chart import ChartDraft, verify_draft
-from clinic_scribe.config import DEFAULT_CLAUDE_MODEL, SUMMARY_MODES, Settings, VadParams, voices_path
+from clinic_scribe.config import DEFAULT_CLAUDE_MODEL, SUMMARY_MODES, Settings, VadParams, diction_path, voices_path
 from clinic_scribe.conversation_summary import ConversationSummary
+from clinic_scribe.diction import COMMON, DictionBook, DictionError, apply_corrections, build_prompt, guess_doctor
 from clinic_scribe.export import export_session
 from clinic_scribe.live_monitor import LiveActivityMonitor
 from clinic_scribe.live_transcriber import LiveTranscriber
@@ -62,6 +63,7 @@ from clinic_scribe.session import Session, TranscriptRun
 from clinic_scribe.speakers import PATIENT, SpeakerEncoder, SpeakerError, VoiceBook, label_segments, main_doctor
 from clinic_scribe.summarizer import ClaudeConfig, SummaryError, summarize
 from clinic_scribe.ui import theme
+from clinic_scribe.ui.diction_dialog import CorrectionDialog
 from clinic_scribe.ui.settings_dialog import SettingsDialog
 from clinic_scribe.ui.simple_view import HistoryRow, SimpleView
 from clinic_scribe.ui.tasks import Job, Task, TaskRunner
@@ -157,6 +159,12 @@ class MainWindow(QMainWindow):
         except SpeakerError as exc:
             self.voices = VoiceBook(voices_path())
             self._voices_error = str(exc)
+        # 의사별 딕션 사전 (용어 목록·교정)
+        try:
+            self.diction = DictionBook.load(diction_path())
+        except DictionError as exc:
+            self.diction = DictionBook(diction_path())
+            self._voices_error = "\n".join(filter(None, [self._voices_error, str(exc)]))
         self._speaker_encoder_cache: SpeakerEncoder | None = None
         self._speaker_issue: str | None = None
         if demo_file is not None:
@@ -385,6 +393,10 @@ class MainWindow(QMainWindow):
         self.simple.voices_clicked.connect(self._open_voices)
         self.simple.developer_clicked.connect(lambda: self._set_view("developer"))
         self.simple.history_selected.connect(self._on_history_selected)
+        # 전사문에서 틀린 말을 골라 오른쪽 클릭 → 고쳐 쓰기 (딕션 사전에 쌓인다)
+        for view in (self.transcript_view, self.simple.transcript_view):
+            view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            view.customContextMenuRequested.connect(lambda pos, v=view: self._transcript_menu(v, pos))
 
         self.tool_status_label = QLabel()
         self.statusBar().setStyleSheet(
@@ -716,7 +728,9 @@ class MainWindow(QMainWindow):
             has_summary=s is not None and not live_session and (s.draft is not None or bool(s.summary_note)),
             can_copy=s is not None and s.draft is not None,
         )
-        self.simple.retry_btn.setVisible(can_summarize and s is not None and bool(s.summary_error))
+        stale = s is not None and s.summary_stale and s.draft is not None and not s.summary_error
+        self.simple.retry_btn.setText("고친 전사문으로 다시 요약" if stale else "요약 다시 시도")
+        self.simple.retry_btn.setVisible(can_summarize and s is not None and (bool(s.summary_error) or stale))
         self._refresh_history()
         self._refresh_status_badge()
 
@@ -1121,10 +1135,54 @@ class MainWindow(QMainWindow):
     def _open_voices(self) -> None:
         if self.recorder.active:
             return
-        dialog = VoiceDialog(self.voices, self._speaker_encoder, self._selected_device(), self)
+        dialog = VoiceDialog(self.voices, self._speaker_encoder, self._selected_device(), self, diction=self.diction)
         dialog.setStyleSheet(theme.stylesheet("VoiceDialog"))
         dialog.exec()
         self._refresh_voices_button()
+
+    # ------------------------------------------------------------ 딕션 사전 (고쳐 쓰기)
+    def _transcript_menu(self, view: QTextBrowser, pos) -> None:
+        menu = view.createStandardContextMenu()
+        selected = view.textCursor().selectedText().strip()
+        action = menu.addAction("선택한 말 고쳐 쓰기…")
+        action.setEnabled(bool(selected) and " " not in selected and self._current_run() is not None)
+        action.triggered.connect(lambda: self._correct_selection(selected))
+        menu.exec(view.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    def _diction_scopes(self) -> list[str]:
+        return list(dict.fromkeys(self.voices.names() + self.diction.doctors()))
+
+    def _correct_selection(self, selected: str) -> None:
+        run = self._current_run()
+        if run is None:
+            return
+        doctor = run.result.doctor or main_doctor(run.result.segments)
+        dialog = CorrectionDialog(selected, self._diction_scopes(), doctor or COMMON, self)
+        dialog.setStyleSheet(theme.stylesheet("CorrectionDialog"))
+        if dialog.exec():
+            self._add_correction(*dialog.values())
+
+    def _add_correction(self, wrong: str, right: str, scope: str, add_term: bool = True) -> bool:
+        """교정을 딕션 사전에 저장하고, 보고 있는 진료의 전사문에 바로 반영한다 (다음 전사부터는 자동)."""
+        try:
+            rule = self.diction.add_correction(scope, wrong, right, add_term)
+            self.diction.save()
+        except (DictionError, OSError) as exc:
+            self._show_error(f"교정을 저장하지 못했습니다: {exc}", warn=True)
+            return False
+        s = self.session
+        run = self._current_run()
+        if run is not None:
+            before = [seg.text for seg in run.result.segments]
+            run.result.segments = apply_corrections(run.result.segments, self.diction)
+            if s is not None and s.draft is not None and before != [seg.text for seg in run.result.segments]:
+                s.summary_stale = True  # 고친 전사문으로 다시 요약할 수 있게 한다
+            self._show_run(run)
+        who = "공통 사전" if scope == COMMON else f"{scope} 사전"
+        self._set_status(f"{who}에 저장: {rule.wrong} → {rule.right} · 다음 전사부터 자동으로 고칩니다", "done")
+        self._refresh_controls()
+        return True
 
     def _split_recording(self, boundary: float, reason: str) -> None:
         """녹음은 이어 가고, boundary 앞까지를 한 진료로 떼어 전사·요약한다."""
@@ -1407,8 +1465,10 @@ class MainWindow(QMainWindow):
         pending = {"audio": source_audio}
         # 등록한 의사가 있으면 전사 뒤에 발화마다 말한 사람을 붙인다 (모델이 없으면 건너뜀)
         voices = self.voices.copy()
+        diction = self.diction.copy()
         encoder = self._speaker_encoder_or_none() if voices.voices else None
         threshold = self.settings.speaker_threshold
+        base_prompt = self.settings.whisper_prompt
 
         def work(cancel) -> TranscriptionResult:
             if session.pcm16 is None:
@@ -1419,9 +1479,16 @@ class MainWindow(QMainWindow):
                     data, rate = pending.pop("audio")
                 session.pcm16 = to_whisper_pcm(data, rate)  # 원본 버퍼는 여기서 놓는다
                 del data
-            result = runner.transcribe(session.pcm16, use_vad=use_vad, params=params, cancel=cancel)
+            # 의사별 용어 목록이 있으면 이 진료의 의사를 먼저 알아내 그 의사의 용어를 Whisper 힌트에 넣는다
+            doctor = None
+            if encoder is not None and diction.doctors():
+                doctor = guess_doctor(session.pcm16, encoder, voices, threshold)
+            prompt = None if diction.empty else build_prompt(base_prompt, diction, doctor)
+            result = runner.transcribe(session.pcm16, use_vad=use_vad, params=params, cancel=cancel, prompt=prompt)
             if encoder is not None and result.segments:
                 result.segments = label_segments(result.segments, session.pcm16, encoder, voices, threshold, cancel)
+            result.segments = apply_corrections(result.segments, diction)  # 잘못 들린 말 → 바른 말
+            result.doctor = doctor
             return result
 
         session.transcribe_error = None
@@ -1587,6 +1654,7 @@ class MainWindow(QMainWindow):
             session.draft = draft
             session.draft_run_id = job.run_id
             session.summary_seconds = task.elapsed
+            session.summary_stale = False
             if shown:
                 self._set_status(f"완료 · {draft.kind_label} 준비됨", "done")
         if shown:
@@ -1668,12 +1736,15 @@ class MainWindow(QMainWindow):
                 return '<p style="color:#8b93a1;">녹음 중입니다. 진료가 끝나면 이 진료 녹음 전체를 전사해 여기에 보여 줍니다.</p>'
             return '<p style="color:#8b93a1;">녹음을 마치거나 오디오 파일을 불러오면 타임스탬프가 있는 전사문이 표시됩니다.</p>'
         r = run.result
+        vocab = f" · {html.escape(r.doctor)} 용어 목록 사용" if r.doctor else ""
         head = (f'<p style="color:#8b93a1;">{html.escape(run.label)} · 녹음 {format_time(r.audio_duration)} · '
-                f"처리 {r.elapsed:.1f}초 · 시각은 이 진료 녹음 기준</p>")
+                f"처리 {r.elapsed:.1f}초 · 시각은 이 진료 녹음 기준{vocab}</p>")
         if not r.segments:
             note = "음성이 감지되지 않았습니다." if r.no_speech_detected else "전사된 발화가 없습니다."
             return head + f'<p style="color:#8b93a1;">{note}</p>'
-        rows = [head]
+        hint = ('<p style="color:#6f7787;">틀린 말은 드래그해 고른 뒤 오른쪽 클릭 → \'선택한 말 고쳐 쓰기\'. '
+                "고친 말은 딕션 사전에 쌓여 다음 진료부터 자동으로 고쳐집니다.</p>")
+        rows = [head, hint]
         for seg in r.segments:
             stamp = f"[{format_time(seg.start)} → {format_time(seg.end)}]"
             text = html.escape(seg.text)
@@ -1686,7 +1757,10 @@ class MainWindow(QMainWindow):
                 if seg.speaker:  # 등록한 의사 목소리와 비교한 결과 (틀릴 수 있음)
                     color = "#fbbf24" if seg.speaker == PATIENT else "#a5b4fc"
                     who = f'<span style="color:{color};font-weight:600;">{html.escape(seg.speaker)}</span>&nbsp; '
-                rows.append(f'<p><span style="color:#8b93a1;font-family:Menlo;">{stamp}</span>&nbsp; {who}{text}</p>')
+                fixed = ""
+                if seg.corrections:  # 딕션 사전으로 고친 말 (원래 들린 말을 함께 보여 준다)
+                    fixed = f'&nbsp;<span style="color:#6f7787;">(고침: {html.escape(", ".join(seg.corrections))})</span>'
+                rows.append(f'<p><span style="color:#8b93a1;font-family:Menlo;">{stamp}</span>&nbsp; {who}{text}{fixed}</p>')
         return "".join(rows)
 
     def _fill_regions(self, run: TranscriptRun | None) -> None:

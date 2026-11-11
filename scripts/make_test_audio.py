@@ -84,6 +84,14 @@ ENROLL_OTHER = [
     ("other", "We will watch it for a few days and talk about tests if it continues.", 0.0),
 ]
 
+# 딕션 사전 확인용: 기본 힌트에 없는 약 이름을 의사가 말한다 (Whisper 가 자주 틀리게 받아 적는 말)
+DOCTOR_DRUGS = [
+    ("doctor", "트리메부틴은 배가 아플 때만 드세요.", 0.9),
+    ("patient", "네, 알겠습니다. 다른 약은요?", 0.9),
+    ("doctor", "알마게이트 현탁액은 속 쓰릴 때 드세요.", 0.9),
+    ("doctor", "세티리진은 자기 전에 한 알 드세요.", 0.0),
+]
+
 # 전사문 안에 지시문이 섞인 경우(프롬프트 주입) 확인용
 INJECTION = [
     ("patient", "이틀 전부터 기침이 나요. 열은 없어요.", 0.8),
@@ -162,6 +170,7 @@ def main() -> int:
             ("two_patients.wav", TWO_PATIENTS, 48000, 1),
             ("voice_enroll_doctor.wav", ENROLL_DOCTOR, 48000, 1),
             ("voice_enroll_other.wav", ENROLL_OTHER, 44100, 1),
+            ("doctor_drugs.wav", DOCTOR_DRUGS, 48000, 1),
         ]
         for name, script, sr, ch in specs:
             audio, marks = compose(script, tmp, rng)

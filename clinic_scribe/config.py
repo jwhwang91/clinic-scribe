@@ -53,6 +53,11 @@ def voices_path() -> Path:
     return settings_path().parent / "voices.json"
 
 
+def diction_path() -> Path:
+    """의사별 딕션 사전(용어 목록·교정). 설정 파일과 같은 폴더."""
+    return settings_path().parent / "diction.json"
+
+
 @dataclass
 class VadParams:
     """whisper.cpp Silero VAD 파라미터 (whisper-cli --vad-* 옵션과 1:1)."""

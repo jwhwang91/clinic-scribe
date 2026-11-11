@@ -562,6 +562,73 @@ def test_cue_splits_only_when_registered_doctor_says_it(window, qapp, samples, s
     window._on_cancel_recording()
 
 
+def test_correcting_transcript_learns_for_next_time(window, qapp, samples):
+    """전사문에서 틀린 말을 고치면 딕션 사전에 쌓이고, 다음 진료부터 자동으로 고쳐진다."""
+    from clinic_scribe.diction import COMMON, DictionBook
+
+    window.open_audio_file(samples / "doctor_drugs.wav", confirm=False)
+    assert wait_until(qapp, lambda: window.session is not None and window.session.runs and not window._tasks)
+    first = window.session
+    assert "트림에 부티는" in transcript_text(first)
+    window._on_summary_clicked()
+    assert wait_until(qapp, lambda: first.draft is not None and not window._tasks)
+    assert window.simple.retry_btn.isHidden()
+
+    assert window._add_correction("트림에 부티는", "트리메부틴은", COMMON)
+    assert "트리메부틴은" in transcript_text(first) and "트림에 부티는" not in transcript_text(first)
+    assert "고침: 트림에 부티는 → 트리메부틴은" in window.transcript_view.toPlainText()  # 원래 들린 말을 함께 보여 준다
+    assert first.summary_stale and not window.simple.retry_btn.isHidden()
+    assert window.simple.retry_btn.text() == "고친 전사문으로 다시 요약"
+    saved = DictionBook.load(window.diction.path)
+    assert saved.entry(COMMON).corrections[0].right == "트리메부틴은"
+    assert "트리메부틴은" in saved.entry(COMMON).vocabulary  # 다음부터 힌트로도 쓴다
+    assert not window._add_correction("가", "나", COMMON)  # 한 글자짜리는 저장하지 않는다
+
+    window.open_audio_file(samples / "doctor_drugs.wav", confirm=False)  # 같은 말이 나오는 다음 진료
+    assert wait_until(qapp, lambda: window.session is not first and window.session.runs and not window._tasks)
+    assert "트리메부틴" in transcript_text(window.session)
+
+
+def test_correction_dialog_checks_input(qapp):
+    from PySide6.QtWidgets import QDialog
+
+    from clinic_scribe.ui.diction_dialog import CorrectionDialog
+
+    dialog = CorrectionDialog("트림에 부티는", ["김원장", "이원장"], "김원장")
+    assert dialog.scope_combo.itemText(0) == "공통 (모든 발화)" and dialog.scope_combo.currentData() == "김원장"
+    dialog.accept()  # 바른 말이 비어 있다
+    assert dialog.result() != QDialog.DialogCode.Accepted.value and "바른 말" in dialog.message.text()
+    dialog.right_edit.setText("트리메부틴은")
+    dialog.accept()
+    assert dialog.result() == QDialog.DialogCode.Accepted.value
+    assert dialog.values() == ("트림에 부티는", "트리메부틴은", "김원장", True)
+
+
+def test_voice_dialog_diction_tab_edits_dictionary(window, qapp):
+    from clinic_scribe.diction import COMMON, Correction, DictionBook
+    from clinic_scribe.ui.voice_dialog import VoiceDialog
+
+    window.voices.enroll("김원장", [np.eye(8, dtype=np.float32)[1]], 20)
+    dialog = VoiceDialog(window.voices, lambda: None, None, window, diction=window.diction)
+    dialog.interactive = False
+    editor = dialog.diction_editor
+    dialog.tabs.setCurrentWidget(editor)
+    assert [editor.scope_combo.itemData(i) for i in range(editor.scope_combo.count())] == [COMMON, "김원장"]
+    editor.vocab_edit.setPlainText("트리메부틴, 세티리진\n트리메부틴")
+    editor._add_row("현타객", "현탁액")
+    editor._add_row("가", "나")  # 두 글자 미만이라 빠진다
+    editor.save()
+    assert window.diction.entry(COMMON).vocabulary == ["트리메부틴", "세티리진"]
+    assert window.diction.entry(COMMON).corrections == [Correction("현타객", "현탁액")]
+    assert "1개는 뺐습니다" in editor.message.text()
+    editor.select_scope("김원장")
+    editor.vocab_edit.setPlainText("레바미피드")
+    dialog.accept()  # 닫을 때도 고친 사전을 저장한다
+    loaded = DictionBook.load(window.diction.path)
+    assert loaded.entry("김원장").vocabulary == ["레바미피드"]
+    assert loaded.entry(COMMON).vocabulary == ["트리메부틴", "세티리진"]
+
+
 def test_auto_split_on_long_silence(window, qapp, samples):
     window.settings.split_silence_s = 4
     FakeInputStream.source = source_audio(samples / "long_pause.wav")

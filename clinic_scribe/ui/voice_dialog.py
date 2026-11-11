@@ -1,4 +1,4 @@
-"""의사 목소리 등록·삭제 화면.
+"""의사 목소리 등록·삭제 화면 (+ '딕션 사전' 탭: 의사별 용어·교정).
 
 등록한 목소리와 비교해 전사문의 발화마다 '의사 이름' 또는 '환자'를 붙인다(이 Mac 에서 처리).
 목소리 특징값은 생체인식정보라 본인 동의를 받은 의사만 등록하고, 이 Mac 의 설정 폴더에만 저장한다.
@@ -23,11 +23,14 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
+    QWidget,
 )
 
 from clinic_scribe import mic_permission
 from clinic_scribe.audio import AudioFileError, load_audio_file, rms_dbfs, to_mono, to_whisper_pcm
+from clinic_scribe.diction import DictionBook
 from clinic_scribe.recorder import InputDevice, Recorder, RecorderError
 from clinic_scribe.speakers import (
     MIN_ENROLL_S,
@@ -40,6 +43,7 @@ from clinic_scribe.speakers import (
     speech_only,
 )
 from clinic_scribe.ui import theme
+from clinic_scribe.ui.diction_dialog import DictionEditor
 from clinic_scribe.ui.widgets import LevelMeter
 
 # 등록할 때 읽는 문장: 진료 때 말투가 나오도록 진료 대화 문장으로 한다.
@@ -53,9 +57,9 @@ READING_SCRIPT = (
 
 class VoiceDialog(QDialog):
     def __init__(self, book: VoiceBook, encoder: Callable[[], SpeakerEncoder], device: InputDevice | None,
-                 parent=None) -> None:
+                 parent=None, diction: DictionBook | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("의사 목소리 등록")
+        self.setWindowTitle("의사 목소리 · 딕션 사전" if diction is not None else "의사 목소리 등록")
         self.setMinimumWidth(640)
         self.book = book
         self.changed = False
@@ -68,8 +72,12 @@ class VoiceDialog(QDialog):
         self._timer.setInterval(100)
         self._timer.timeout.connect(self._on_tick)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 18, 20, 16)
+        outer.setSpacing(10)
+        voice_page = QWidget()
+        layout = QVBoxLayout(voice_page)
+        layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(10)
         title = QLabel("등록된 의사")
         title.setObjectName("cardTitle")
@@ -136,19 +144,42 @@ class VoiceDialog(QDialog):
         self.message.hide()
         layout.addWidget(self.message)
 
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
+        enroll_row = QHBoxLayout()
+        enroll_row.addStretch(1)
         self.enroll_btn = QPushButton("등록")
         self.enroll_btn.setObjectName("primary")
         self.enroll_btn.clicked.connect(self._on_enroll)
+        enroll_row.addWidget(self.enroll_btn)
+        layout.addLayout(enroll_row)
+
+        # 딕션 사전 탭: 의사별 자주 쓰는 용어와 '잘못 들린 말 → 바른 말'
+        self.diction_editor: DictionEditor | None = None
+        if diction is not None:
+            self.diction_editor = DictionEditor(diction, self.book.names)
+            self.tabs = QTabWidget()
+            self.tabs.addTab(voice_page, "목소리")
+            self.tabs.addTab(self.diction_editor, "딕션 사전")
+            self.tabs.currentChanged.connect(self._on_tab_changed)
+            outer.addWidget(self.tabs, 1)
+        else:
+            outer.addWidget(voice_page, 1)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
         close_btn = QPushButton("닫기")
         close_btn.clicked.connect(self.accept)
-        bottom.addWidget(self.enroll_btn)
         bottom.addWidget(close_btn)
-        layout.addLayout(bottom)
+        outer.addLayout(bottom)
         for button in (self.remove_btn, self.record_btn, self.file_btn, self.enroll_btn, close_btn):
             button.setAutoDefault(False)  # 이름 칸에서 Enter 를 눌러도 등록·닫기가 되지 않게
         self._refresh()
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.diction_editor is None:
+            return
+        if self.tabs.widget(index) is self.diction_editor:
+            self.diction_editor.refresh_scopes()  # 방금 등록한 의사도 사전 목록에 나오게
+        else:
+            self.diction_editor.save(quiet=True)
 
     # ---- 화면 상태 ----------------------------------------------------------
     def _refresh(self) -> None:
@@ -287,8 +318,10 @@ class VoiceDialog(QDialog):
                                       QMessageBox.StandardButton.No)
         return answer == QMessageBox.StandardButton.Yes
 
-    def done(self, result: int) -> None:  # noqa: D401 — 닫을 때 마이크를 놓는다
+    def done(self, result: int) -> None:  # noqa: D401 — 닫을 때 마이크를 놓고, 고친 사전을 저장한다
         self._timer.stop()
         if self._recorder.active:
             self._recorder.abort()
+        if self.diction_editor is not None:
+            self.diction_editor.save(quiet=True)
         super().done(result)

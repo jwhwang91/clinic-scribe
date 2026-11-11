@@ -42,6 +42,7 @@ class Session:
     summary_error: str | None = None
     summary_note: str | None = None  # 요약을 요청하지 않은 이유 등 안내
     summary_short: str | None = None  # 진행 단계에 쓰는 짧은 안내
+    summary_stale: bool = False  # 요약 뒤에 전사문을 고쳤다 (고친 전사문으로 다시 요약할 수 있음)
     live_clips: list[LiveClip] = field(default_factory=list)
     exported: bool = False
     # 녹음 진료 정보
