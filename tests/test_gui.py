@@ -532,8 +532,13 @@ def test_transcript_marks_registered_doctor(window, qapp, samples, speaker_encod
     assert window.simple.voices_btn.text() == "의사 목소리 1"
     window.open_audio_file(samples / "mock_consult.wav", confirm=False)
     assert wait_until(qapp, lambda: window.session is not None and window.session.runs and not window._tasks)
-    speakers = {seg.speaker for seg in window.session.runs[-1].result.segments}
-    assert {"김원장", PATIENT} <= speakers
+    # 질문과 대답이 따로 줄이 되고, 줄마다 말한 사람이 실제 역할과 맞는다 ("네." 처럼 짧은 말은 판단하지 않음)
+    utterances = json.loads((samples / "manifest.json").read_text(encoding="utf-8"))["mock_consult.wav"]["utterances"]
+    lines = window.session.runs[-1].result.segments
+    assert len(lines) == len(utterances)
+    for line, utt in zip(lines, utterances):
+        expected = None if utt["end"] - utt["start"] < 1.0 else ("김원장" if utt["role"] == "doctor" else PATIENT)
+        assert line.speaker == expected, utt["text"]
     assert "김원장" in window.transcript_view.toPlainText() and "환자" in window.transcript_view.toPlainText()
     assert "의사 김원장" in window.simple.history.item(0).text()
 

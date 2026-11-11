@@ -69,7 +69,15 @@ from clinic_scribe.ui.simple_view import HistoryRow, SimpleView
 from clinic_scribe.ui.tasks import Job, Task, TaskRunner
 from clinic_scribe.ui.voice_dialog import VoiceDialog
 from clinic_scribe.ui.widgets import BrandMark, LevelMeter, PipelineView, TimelineView, WaveformView
-from clinic_scribe.whisper import TranscriptionResult, WhisperConfig, WhisperError, WhisperRunner, format_time
+from clinic_scribe.whisper import (
+    TranscriptionResult,
+    WhisperConfig,
+    WhisperError,
+    WhisperRunner,
+    assign_regions,
+    format_time,
+    merge_phrases,
+)
 
 PRIVACY_NOTE = (
     "녹음과 전사(whisper.cpp)는 이 Mac 에서만 처리됩니다. "
@@ -1486,7 +1494,12 @@ class MainWindow(QMainWindow):
             prompt = None if diction.empty else build_prompt(base_prompt, diction, doctor)
             result = runner.transcribe(session.pcm16, use_vad=use_vad, params=params, cancel=cancel, prompt=prompt)
             if encoder is not None and result.segments:
-                result.segments = label_segments(result.segments, session.pcm16, encoder, voices, threshold, cancel)
+                if result.phrases:  # 말 덩어리마다 말한 사람을 정하고, 사람이 바뀌는 곳에서 줄을 나눠 다시 잇는다
+                    labeled = label_segments(result.phrases, session.pcm16, encoder, voices, threshold, cancel)
+                    result.segments = merge_phrases(labeled)
+                    assign_regions(result.segments, result.regions, result.vad_enabled)
+                else:
+                    result.segments = label_segments(result.segments, session.pcm16, encoder, voices, threshold, cancel)
             result.segments = apply_corrections(result.segments, diction)  # 잘못 들린 말 → 바른 말
             result.doctor = doctor
             return result

@@ -11,6 +11,10 @@
         출력 예: "Speech segment 0: start = 66.00, end = 474.00" (센티초, 원본 녹음 기준)
 VAD 를 끄고 전사할 때도 음성 구간을 구해, 음성이 없는 곳에서 나온 전사(무음에서의 Whisper 환각,
 예: "자막 제공 및 광고를 포함하고 있습니다")를 표시한다.
+줄 나누기: Whisper 는 짧게 주고받는 질문과 대답을 한 줄로 받아 적곤 한다(힌트에 따라 달라짐). 그래서 VAD 전사는
+        단어 단위(-ml 1 -sow, 시각은 원본 기준)로 받아, 짧은 쉼(0.3초)으로 나뉜 말 덩어리마다 묶고,
+        문장이 끝났거나 쉼이 1초 이상이거나 말한 사람이 바뀌면 새 줄로 한다. 받아 적는 글자는 같다(-ml 은 후처리).
+        토큰 시각(-ojf)은 VAD 로 무음을 뺀 시각이라 쓰지 않는다.
 """
 
 from __future__ import annotations
@@ -34,6 +38,11 @@ from clinic_scribe.config import VadParams
 
 SEGMENT_LINE = re.compile(r"Speech segment\s+\d+:\s*start\s*=\s*([\d.]+),\s*end\s*=\s*([\d.]+)")
 LOW_TOKEN_PROB = 0.5
+# 줄 나누기: 말 덩어리는 이보다 긴 쉼에서 나눈다 (사람이 바뀔 때의 쉼). 줄은 문장 끝·긴 쉼·말한 사람이 바뀔 때 나눈다.
+PHRASE_MIN_SILENCE_MS = 300
+PHRASE_PAD_MS = 50
+LINE_BREAK_GAP_S = 1.0
+_SENTENCE_END = re.compile(r"[.?!。？！…]\s*$")
 
 
 class WhisperError(Exception):
@@ -74,6 +83,7 @@ class TranscriptionResult:
     audio_duration: float
     elapsed: float
     doctor: str | None = None  # 이 진료 의사로 보고 그 의사의 딕션 사전(용어 목록)을 쓴 경우
+    phrases: list[TranscriptSegment] | None = None  # 줄로 잇기 전 말 덩어리 (말한 사람을 정해 다시 이을 때 쓴다)
 
     @property
     def is_empty(self) -> bool:
@@ -225,6 +235,72 @@ def assign_regions(segments: list[TranscriptSegment], regions: list[SpeechRegion
             seg.speech_detected = sum(overlaps) >= min(0.3, 0.3 * max(0.01, seg.end - seg.start))
 
 
+def phrase_params(params: VadParams) -> VadParams:
+    """말 덩어리를 찾는 VAD 설정: 사용자 설정보다 짧은 쉼에서도 나눈다 (질문과 대답 사이의 쉼)."""
+    return dataclasses.replace(
+        params,
+        min_silence_ms=min(params.min_silence_ms, PHRASE_MIN_SILENCE_MS),
+        speech_pad_ms=min(params.speech_pad_ms, PHRASE_PAD_MS),
+        min_speech_ms=min(params.min_speech_ms, 100),
+    )
+
+
+def group_words(words: list[TranscriptSegment], pauses: list[SpeechRegion]) -> list[TranscriptSegment]:
+    """단어 단위 전사를 짧은 쉼으로 나뉜 말 덩어리마다 묶는다. 시각은 말 덩어리(VAD) 경계를 쓴다.
+
+    단어 시각은 무음을 뺀 이음매에서 쉼 쪽으로 밀리기 쉬워, 겹침이 가장 큰 덩어리(없으면 가장 가까운 덩어리)에 붙인다.
+    """
+    words = [w for w in words if w.text.strip()]
+    if not pauses:
+        return words
+    buckets: dict[int, list[TranscriptSegment]] = {}
+    for word in words:
+        overlaps = [min(word.end, r.end) - max(word.start, r.start) for r in pauses]
+        best = max(range(len(pauses)), key=lambda i: overlaps[i])
+        if overlaps[best] <= 0:
+            centre = (word.start + word.end) / 2
+            best = min(range(len(pauses)), key=lambda i: max(pauses[i].start - centre, centre - pauses[i].end, 0.0))
+        buckets.setdefault(best, []).append(word)
+    phrases = []
+    for index in sorted(buckets):
+        group = buckets[index]
+        probs = [w.confidence for w in group if w.confidence is not None]
+        phrases.append(TranscriptSegment(
+            start=pauses[index].start,
+            end=pauses[index].end,
+            text=" ".join(w.text.strip() for w in group),
+            confidence=sum(probs) / len(probs) if probs else None,
+            uncertain_terms=[term for w in group for term in w.uncertain_terms],
+        ))
+    return phrases
+
+
+def merge_phrases(phrases: list[TranscriptSegment], break_gap: float = LINE_BREAK_GAP_S) -> list[TranscriptSegment]:
+    """말 덩어리를 줄로 잇는다. 앞 덩어리가 문장으로 끝났거나, 쉼이 break_gap 이상이거나, 말한 사람이 다르면 새 줄.
+
+    누구인지 아는 말이 새로 시작되면 줄을 나눈다(모르는 앞말을 그 사람 말로 붙이지 않게). 아는 말 뒤에 이어지는
+    누구인지 모르는 짧은 덩어리("식후에")는 앞 줄에 잇는다.
+    """
+    lines: list[TranscriptSegment] = []
+    for phrase in phrases:
+        if lines:
+            prev = lines[-1]
+            other_speaker = bool(phrase.speaker and prev.speaker != phrase.speaker)
+            if not other_speaker and phrase.start - prev.end < break_gap and not _SENTENCE_END.search(prev.text):
+                probs = [c for c in (prev.confidence, phrase.confidence) if c is not None]
+                lines[-1] = dataclasses.replace(
+                    prev,
+                    end=phrase.end,
+                    text=f"{prev.text} {phrase.text}",
+                    confidence=sum(probs) / len(probs) if probs else None,
+                    uncertain_terms=prev.uncertain_terms + phrase.uncertain_terms,
+                    speaker=prev.speaker or phrase.speaker,
+                )
+                continue
+        lines.append(dataclasses.replace(phrase))
+    return lines
+
+
 class WhisperRunner:
     def __init__(self, config: WhisperConfig):
         self.config = config
@@ -270,8 +346,15 @@ class WhisperRunner:
             wav = tmp / "input.wav"
             write_wav(wav, pcm16, WHISPER_SR)
             regions = self.detect_regions(wav, params, cancel) if self.can_detect_regions() else None
+            phrases: list[TranscriptSegment] | None = None
             if use_vad and regions == []:
                 segments: list[TranscriptSegment] = []  # 음성 없음: Whisper 를 돌리지 않는다
+            elif use_vad and regions:
+                # 단어 단위로 받아 말 덩어리로 묶고 줄로 잇는다 (질문과 대답이 한 줄로 합쳐지지 않게)
+                words = self._run_whisper(wav, tmp / "out", use_vad, params, cancel, prompt, word_level=True)
+                pauses = self.detect_regions(wav, phrase_params(params), cancel) or regions
+                phrases = group_words(words, pauses)
+                segments = merge_phrases(phrases)
             else:
                 segments = self._run_whisper(wav, tmp / "out", use_vad, params, cancel, prompt)
             assign_regions(segments, regions, use_vad)
@@ -282,13 +365,14 @@ class WhisperRunner:
                 vad_params=dataclasses.replace(params),
                 audio_duration=duration_s(pcm16),
                 elapsed=time.monotonic() - started,
+                phrases=phrases,
             )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
     def _run_whisper(
         self, wav: Path, out_base: Path, use_vad: bool, params: VadParams, cancel: threading.Event | None,
-        prompt: str | None = None,
+        prompt: str | None = None, word_level: bool = False,
     ) -> list[TranscriptSegment]:
         cfg = self.config
         cmd = [
@@ -297,6 +381,8 @@ class WhisperRunner:
             "-t", str(cfg.threads or default_threads()),
             "-oj", "-ojf", "-of", str(out_base),
         ]
+        if word_level:
+            cmd += ["-ml", "1", "-sow"]  # 단어마다 한 구간 (원본 녹음 시각). 받아 적는 글자는 같다
         hint = (cfg.prompt if prompt is None else prompt).strip()
         if hint:
             cmd += ["--prompt", hint]

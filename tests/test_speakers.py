@@ -128,3 +128,34 @@ def test_real_model_tells_mock_doctor_from_patient(samples, manifest, speaker_en
     speech = speech_only(pcm("voice_enroll_other.wav"))
     other.enroll("박원장", enrollment_embeddings(speaker_encoder, speech), len(speech) / SAMPLE_RATE)
     assert all(s.speaker in (PATIENT, None) for s in label_segments(segments, consult, speaker_encoder, other, threshold))
+
+
+@pytest.mark.models
+def test_lines_split_where_speaker_changes_even_without_punctuation(samples, manifest, whisper_runner, speaker_encoder,
+                                                                     settings, tmp_path):
+    """Whisper 가 문장부호 없이 받아 적어도, 의사 목소리를 등록했으면 말한 사람이 바뀌는 곳에서 줄을 나눈다."""
+    from clinic_scribe.audio import load_audio_file, to_whisper_pcm
+    from clinic_scribe.whisper import merge_phrases
+
+    def pcm(name):
+        data, rate = load_audio_file(samples / name)
+        return to_whisper_pcm(data, rate)
+
+    book = VoiceBook(tmp_path / "voices.json")
+    speech = speech_only(pcm("voice_enroll_doctor.wav"))
+    book.enroll("김원장", enrollment_embeddings(speaker_encoder, speech), len(speech) / SAMPLE_RATE)
+    audio = pcm("doctor_drugs.wav")
+    # 이 힌트로는 문장부호가 빠져 말 덩어리만으로는 의사·환자 말이 한 줄로 이어진다
+    result = whisper_runner.transcribe(audio, use_vad=True, params=settings.vad,
+                                       prompt=f"트리메부틴, 알마게이트, 세티리진, 트리메부틴은, 현탁액, {settings.whisper_prompt}")
+    utterances = manifest["doctor_drugs.wav"]["utterances"]
+
+    def roles(seg):
+        return {u["role"] for u in utterances if min(seg.end, u["end"]) - max(seg.start, u["start"]) > 0.15}
+
+    assert any(len(roles(seg)) > 1 for seg in result.segments)  # 말한 사람을 모르면 섞인다
+    lines = merge_phrases(label_segments(result.phrases, audio, speaker_encoder, book, settings.speaker_threshold))
+    assert all(len(roles(line)) == 1 for line in lines), [(line.speaker, line.text) for line in lines]
+    for line in lines:
+        expected = "김원장" if roles(line) == {"doctor"} else PATIENT
+        assert line.speaker == expected, line.text

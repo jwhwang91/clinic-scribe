@@ -102,3 +102,19 @@ def test_temporary_audio_is_removed(whisper_runner, settings, samples):
     before = set(glob.glob(pattern))
     whisper_runner.transcribe(load_pcm(samples / "mock_consult_short.wav"), use_vad=True, params=settings.vad)
     assert set(glob.glob(pattern)) <= before
+
+
+@pytest.mark.parametrize("hint", ["기본", "용어를 쉼표로 이은 힌트"])
+def test_question_and_answer_are_separate_lines(whisper_runner, settings, samples, manifest, hint):
+    """짧게 주고받는 질문과 대답이 한 줄로 합쳐지지 않고, 줄 시각이 실제 발화와 맞는다.
+
+    예전에는 힌트에 따라 "어디가 불편해서 오셨어요? 사흘 전부터…"처럼 두 사람 말이 한 줄로 나왔다.
+    """
+    prompt = None if hint == "기본" else f"트리메부틴, 알마게이트, 세티리진, 트리메부틴은, 현탁액, {settings.whisper_prompt}"
+    result = whisper_runner.transcribe(load_pcm(samples / "mock_consult.wav"), use_vad=True, params=settings.vad,
+                                       prompt=prompt)
+    utterances = manifest["mock_consult.wav"]["utterances"]
+    assert len(result.segments) == len(utterances)
+    for seg, utt in zip(result.segments, utterances):
+        assert abs(seg.start - utt["start"]) < 0.3 and abs(seg.end - utt["end"]) < 0.3, (seg, utt["text"])
+    assert result.phrases is not None and len(result.phrases) >= len(result.segments)
