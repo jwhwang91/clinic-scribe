@@ -1143,7 +1143,13 @@ class MainWindow(QMainWindow):
     def _open_voices(self) -> None:
         if self.recorder.active:
             return
-        dialog = VoiceDialog(self.voices, self._speaker_encoder, self._selected_device(), self, diction=self.diction)
+        runner, params = self._whisper_runner(), self._vad_params()
+
+        def transcribe(pcm16, prompt=None):  # 따라 읽기 분석용 (진료 전사와 같은 설정)
+            return runner.transcribe(pcm16, use_vad=True, params=params, prompt=prompt)
+
+        dialog = VoiceDialog(self.voices, self._speaker_encoder, self._selected_device(), self, diction=self.diction,
+                             transcribe=transcribe, base_prompt=self.settings.whisper_prompt)
         dialog.setStyleSheet(theme.stylesheet("VoiceDialog"))
         dialog.exec()
         self._refresh_voices_button()

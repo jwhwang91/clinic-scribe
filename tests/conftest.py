@@ -13,8 +13,8 @@ SAMPLES = REPO / "samples"
 # 테스트가 쓰는 가상 음성. 하나라도 없으면 다시 만든다 (생성기에 새 음성을 추가했을 때).
 REQUIRED_SAMPLES = (
     "manifest.json", "mock_consult_short.wav", "mock_consult.wav", "long_pause.wav", "injection.wav", "daily_chat.wav",
-    "two_patients.wav", "voice_enroll_doctor.wav", "voice_enroll_other.wav", "doctor_drugs.wav", "silence.wav",
-    "quiet_room.wav",
+    "two_patients.wav", "voice_enroll_doctor.wav", "voice_enroll_other.wav", "doctor_drugs.wav", "training_session.wav",
+    "silence.wav", "quiet_room.wav",
 )
 
 

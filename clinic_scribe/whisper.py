@@ -248,7 +248,9 @@ def phrase_params(params: VadParams) -> VadParams:
 def group_words(words: list[TranscriptSegment], pauses: list[SpeechRegion]) -> list[TranscriptSegment]:
     """단어 단위 전사를 짧은 쉼으로 나뉜 말 덩어리마다 묶는다. 시각은 말 덩어리(VAD) 경계를 쓴다.
 
-    단어 시각은 무음을 뺀 이음매에서 쉼 쪽으로 밀리기 쉬워, 겹침이 가장 큰 덩어리(없으면 가장 가까운 덩어리)에 붙인다.
+    whisper.cpp 는 쉼 뒤 첫 낱말의 시각을 앞으로 당겨 찍는다(긴 녹음 뒤쪽에서는 1초 넘게). 그래서
+    - 낱말 길이의 30% 이상이 겹치는 덩어리에 붙이고, 그렇지 않은 낱말(쉼 속에 떠 있음)은 다음 덩어리의 첫 낱말로 보며,
+    - 한 덩어리 안에서 문장이 끝난 뒤 남은 낱말("…말씀드릴게요. 증상이")은 다음 덩어리의 첫머리로 옮긴다.
     """
     words = [w for w in words if w.text.strip()]
     if not pauses:
@@ -257,10 +259,15 @@ def group_words(words: list[TranscriptSegment], pauses: list[SpeechRegion]) -> l
     for word in words:
         overlaps = [min(word.end, r.end) - max(word.start, r.start) for r in pauses]
         best = max(range(len(pauses)), key=lambda i: overlaps[i])
-        if overlaps[best] <= 0:
-            centre = (word.start + word.end) / 2
-            best = min(range(len(pauses)), key=lambda i: max(pauses[i].start - centre, centre - pauses[i].end, 0.0))
+        if overlaps[best] < 0.3 * max(word.end - word.start, 0.01):
+            best = next((i for i, r in enumerate(pauses) if r.start >= word.start), len(pauses) - 1)
         buckets.setdefault(best, []).append(word)
+    for index in sorted(buckets):
+        group = buckets[index]
+        ends = [i for i, w in enumerate(group) if _SENTENCE_END.search(w.text)]
+        if index + 1 < len(pauses) and ends and ends[-1] < len(group) - 1:
+            buckets[index] = group[: ends[-1] + 1]
+            buckets[index + 1] = group[ends[-1] + 1 :] + buckets.get(index + 1, [])
     phrases = []
     for index in sorted(buckets):
         group = buckets[index]

@@ -19,6 +19,9 @@ import numpy as np
 import soundfile as sf
 import soxr
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from clinic_scribe.training import DEFAULT_PROMPTS  # noqa: E402  (따라 읽기 문장 목록은 앱과 같게)
+
 # 이 Mac 의 한국어 음성 중 파일 출력(say -o)이 되는 것은 Yuna 뿐이라 (Reed, Eddy 등은 무음 파일을 만든다)
 # 의사 역할은 같은 음성을 낮은 음높이로 바꿔 목소리를 구분한다.
 VOICES = {"patient": ("Yuna", 1.0), "doctor": ("Yuna", 0.84), "other": ("Daniel", 1.0)}
@@ -91,6 +94,9 @@ DOCTOR_DRUGS = [
     ("doctor", "알마게이트 현탁액은 속 쓰릴 때 드세요.", 0.9),
     ("doctor", "세티리진은 자기 전에 한 알 드세요.", 0.0),
 ]
+
+# 따라 읽기 학습: 의사가 화면의 기본 문장 12개를 차례로 따라 읽는다 (앱의 문장 목록과 같은 순서)
+TRAINING_SESSION = [("doctor", prompt, 1.2) for prompt in DEFAULT_PROMPTS]
 
 # 전사문 안에 지시문이 섞인 경우(프롬프트 주입) 확인용
 INJECTION = [
@@ -171,9 +177,10 @@ def main() -> int:
             ("voice_enroll_doctor.wav", ENROLL_DOCTOR, 48000, 1),
             ("voice_enroll_other.wav", ENROLL_OTHER, 44100, 1),
             ("doctor_drugs.wav", DOCTOR_DRUGS, 48000, 1),
+            ("training_session.wav", TRAINING_SESSION, 48000, 1),
         ]
         for name, script, sr, ch in specs:
-            audio, marks = compose(script, tmp, rng)
+            audio, marks = compose(script, tmp, rng, tail_s=1.5 if name == "training_session.wav" else 0.8)
             write(out_dir / name, audio, sr, ch)
             manifest[name] = {"sample_rate": sr, "channels": ch, "duration": len(audio) / WORK_SR, "utterances": marks}
             print(f"  {name}: {len(audio) / WORK_SR:.1f}s, {len(marks)} utterances, {sr} Hz, {ch} ch")

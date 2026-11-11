@@ -508,7 +508,7 @@ def test_voice_dialog_enrolls_from_file_and_removes(window, qapp, samples, speak
 
     dialog = VoiceDialog(window.voices, lambda: speaker_encoder, None, window)
     dialog.interactive = False
-    assert not dialog.record_btn.isEnabled() and not dialog.enroll_btn.isEnabled()  # 입력 장치·소리가 아직 없다
+    assert not dialog.train_btn.isEnabled() and not dialog.enroll_btn.isEnabled()  # 입력 장치·전사·소리가 아직 없다
     dialog.load_file(samples / "mock_consult_short.wav")
     assert "초뿐" in dialog.message.text()  # 말소리가 10초보다 짧다
     dialog.load_file(samples / "voice_enroll_doctor.wav")
@@ -522,6 +522,39 @@ def test_voice_dialog_enrolls_from_file_and_removes(window, qapp, samples, speak
     dialog.list.setCurrentRow(0)
     dialog.remove_btn.click()
     assert window.voices.names() == []
+    dialog.reject()
+
+
+def test_guided_reading_registers_voice_and_learns_diction(window, qapp, samples, speaker_encoder):
+    """따라 읽기 학습: 문장을 읽고 쉬면 다음 문장으로 넘어가고, 끝나면 분석해 목소리와 그 의사의 딕션 사전을 저장한다."""
+    from clinic_scribe.training import DEFAULT_PROMPTS
+    from clinic_scribe.ui.voice_dialog import VoiceDialog
+
+    runner, params = window._whisper_runner(), window._vad_params()
+    dialog = VoiceDialog(window.voices, lambda: speaker_encoder, FAKE_DEVICE, window, diction=window.diction,
+                         transcribe=lambda pcm, prompt=None: runner.transcribe(pcm, use_vad=True, params=params, prompt=prompt),
+                         base_prompt=window.settings.whisper_prompt)
+    dialog.interactive = False
+    panel = dialog.training
+    dialog.name_edit.setText("김원장")
+    dialog.train_btn.click()
+    assert dialog.voice_stack.currentWidget() is not panel and "동의" in dialog.message.text()  # 동의가 먼저
+    dialog.consent.setChecked(True)
+    FakeInputStream.source = source_audio(samples / "training_session.wav")  # 가상 의사가 문장 12개를 차례로 읽는다
+    dialog.train_btn.click()
+    assert dialog.voice_stack.currentWidget() is panel and panel.prompt_label.text() == DEFAULT_PROMPTS[0]
+    assert wait_until(qapp, lambda: panel._index >= 1, 20)  # 다 읽고 쉬면 저절로 다음 문장
+    assert panel.prompt_label.text() == DEFAULT_PROMPTS[1]
+    assert wait_until(qapp, lambda: panel.result is not None or panel.error is not None, 120)
+    result = panel.result
+    assert result is not None and result.correct_after > result.correct_before
+    assert panel.findings.count() == len(result.findings) > 0
+    panel.save_btn.click()
+    assert dialog.voice_stack.currentIndex() == 0 and "저장했습니다" in dialog.message.text()
+    assert window.voices.names() == ["김원장"]
+    learned = window.diction.entry("김원장")
+    assert any(c.right.startswith("트리메부틴") for c in learned.corrections)
+    assert any(term.startswith("트리메부틴") for term in learned.vocabulary)  # 다음부터 힌트로도 쓴다
     dialog.reject()
 
 
