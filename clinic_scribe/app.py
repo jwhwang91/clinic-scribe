@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication
 
 from clinic_scribe.config import Settings
@@ -44,11 +44,12 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("clinic-scribe")
+    # 화면 색은 어두운 배경 기준이다. 시스템이 밝은 모드여도 설정·확인 창까지 어둡게 맞춘다.
+    app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
     settings = Settings.load()
     if args.summary:
         settings.summary_mode = args.summary
-    window = MainWindow(settings, demo_file=args.demo, demo_speed=args.demo_speed)
-    window.resize(1400, 900)
+    window = MainWindow(settings, demo_file=args.demo, demo_speed=args.demo_speed)  # 창 크기는 화면 종류에 맞춘다
     window.show()
 
     # 터미널에서 Ctrl+C 를 눌러도 마이크를 놓고 정리한 뒤 끝나게 한다.

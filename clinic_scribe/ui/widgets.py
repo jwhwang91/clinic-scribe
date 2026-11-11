@@ -1,4 +1,4 @@
-"""작은 위젯들: 입력 레벨, 입력 파형, 음성 구간 타임라인, 진행 단계, 경로 입력칸."""
+"""작은 위젯들: 앱 표시, 입력 레벨, 입력 파형, 음성 구간 타임라인, 진행 단계, 경로 입력칸."""
 
 from __future__ import annotations
 
@@ -6,8 +6,29 @@ import math
 from collections import deque
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QWidget
+
+
+class BrandMark(QWidget):
+    """앱 표시: 둥근 사각형 안의 음성 막대 세 개."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(26, 26)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 이름)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        gradient = QLinearGradient(0, 0, 26, 26)
+        gradient.setColorAt(0.0, QColor("#8b8ef8"))
+        gradient.setColorAt(1.0, QColor("#4f46e5"))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(gradient)
+        p.drawRoundedRect(QRectF(0, 0, 26, 26), 8, 8)
+        p.setBrush(QColor("#ffffff"))
+        for x, height in ((7.0, 8.0), (11.5, 14.0), (16.0, 10.0)):
+            p.drawRoundedRect(QRectF(x, 13 - height / 2, 3, height), 1.5, 1.5)
 
 
 class LevelMeter(QWidget):
@@ -16,7 +37,7 @@ class LevelMeter(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._db = -120.0
-        self.setMinimumSize(200, 16)
+        self.setMinimumSize(150, 18)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def set_level(self, db: float) -> None:
@@ -25,14 +46,19 @@ class LevelMeter(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt 이름)
         painter = QPainter(self)
-        rect = self.rect()
-        painter.fillRect(rect, QColor("#3f3f46"))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#1f2430"))
+        painter.drawRoundedRect(rect, 6, 6)
         fraction = min(1.0, max(0.0, (self._db + 60.0) / 60.0))
-        color = "#22c55e" if self._db < -12 else ("#eab308" if self._db < -3 else "#ef4444")
-        painter.fillRect(QRectF(rect.x(), rect.y(), rect.width() * fraction, rect.height()), QColor(color))
-        painter.setPen(QColor("#f4f4f5"))
+        if fraction > 0.02:
+            color = "#4ade80" if self._db < -12 else ("#fbbf24" if self._db < -3 else "#f87171")
+            painter.setBrush(QColor(color))
+            painter.drawRoundedRect(QRectF(rect.x(), rect.y(), max(rect.height(), rect.width() * fraction), rect.height()), 6, 6)
+        painter.setPen(QColor("#cbd2dc"))
         label = f"{self._db:.0f} dBFS" if self._db > -120 else "입력 없음"
-        painter.drawText(rect.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, label)
+        painter.drawText(rect.adjusted(8, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, label)
         painter.end()
 
 
@@ -61,24 +87,29 @@ class WaveformView(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        rect = self.rect()
-        painter.fillRect(rect, QColor("#18181b"))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#12151c"))
+        painter.drawRoundedRect(rect, 10, 10)
         mid = rect.center().y()
-        painter.setPen(QColor("#3f3f46"))
-        painter.drawLine(rect.left(), mid, rect.right(), mid)
+        painter.setPen(QColor("#232834"))
+        painter.drawLine(QPointF(rect.left() + 10, mid), QPointF(rect.right() - 10, mid))
         if not self._values:
-            painter.setPen(QColor("#a1a1aa"))
+            painter.setPen(QColor("#6f7787"))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "녹음을 시작하면 입력 파형이 여기에 흐릅니다")
             painter.end()
             return
-        bar = rect.width() / self._values.maxlen
-        half = rect.height() / 2 - 3
+        inner = rect.adjusted(10, 6, -10, -6)
+        bar = inner.width() / self._values.maxlen
+        half = inner.height() / 2
         count = len(self._values)
+        painter.setPen(Qt.PenStyle.NoPen)
         for i, (peak, speaking) in enumerate(self._values):
-            x = rect.right() - (count - i) * bar
+            x = inner.right() - (count - i) * bar
             height = max(1.0, _amp_fraction(peak) * half)
-            painter.fillRect(QRectF(x, mid - height, max(1.0, bar - 1), 2 * height),
-                             QColor("#22c55e" if speaking else "#60a5fa"))
+            painter.setBrush(QColor("#4ade80" if speaking else "#818cf8"))
+            painter.drawRect(QRectF(x, mid - height, max(1.0, bar - 1), 2 * height))
         painter.end()
 
 
@@ -87,7 +118,7 @@ class TimelineView(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(46)
+        self.setMinimumHeight(50)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.clear()
 
@@ -104,33 +135,35 @@ class TimelineView(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        rect = self.rect()
-        painter.fillRect(rect, QColor("#f4f4f5"))
-        track = QRectF(rect.left() + 8, rect.top() + 18, rect.width() - 16, 14)
-        painter.fillRect(track, QColor("#e4e4e7"))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+        track = QRectF(rect.left() + 4, rect.top() + 21, rect.width() - 8, 12)
         caption = "실시간 감지 클립(미리보기)" if self.live else "Silero VAD 음성 구간 (원본 녹음 기준)"
-        painter.setPen(QColor("#52525b"))
-        painter.drawText(QRectF(rect.left() + 8, rect.top() + 1, rect.width() - 16, 16),
+        painter.setPen(QColor("#a3aab8"))
+        painter.drawText(QRectF(rect.left() + 4, rect.top(), rect.width() - 8, 18),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          f"음성 구간 타임라인 · {caption}")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#232834"))
+        painter.drawRoundedRect(track, 6, 6)
         scale = max(self.duration, 30.0)
-        color = QColor("#4ade80" if self.live else "#3b82f6")
+        painter.setBrush(QColor("#4ade80" if self.live else "#818cf8"))
         for start, end in self.regions:
             x0 = track.left() + track.width() * max(0.0, start) / scale
             x1 = track.left() + track.width() * min(scale, max(start, end)) / scale
-            painter.fillRect(QRectF(x0, track.top(), max(2.0, x1 - x0), track.height()), color)
+            painter.drawRoundedRect(QRectF(x0, track.top(), max(3.0, x1 - x0), track.height()), 3, 3)
         step = next((s for s in (5, 10, 30, 60, 120, 300, 600, 1800) if scale / s <= 10), 3600)
-        painter.setPen(QColor("#71717a"))
+        painter.setPen(QColor("#6f7787"))
         t = 0
         while t <= scale:
             x = track.left() + track.width() * t / scale
-            painter.drawLine(QPointF(x, track.bottom()), QPointF(x, track.bottom() + 3))
-            painter.drawText(QRectF(x - 30, track.bottom() + 2, 60, 12), Qt.AlignmentFlag.AlignCenter,
+            painter.drawLine(QPointF(x, track.bottom() + 1), QPointF(x, track.bottom() + 4))
+            painter.drawText(QRectF(x - 30, track.bottom() + 3, 60, 13), Qt.AlignmentFlag.AlignCenter,
                              f"{int(t) // 60:02d}:{int(t) % 60:02d}")
             t += step
         if self.cursor is not None:
             x = track.left() + track.width() * min(self.cursor, scale) / scale
-            painter.setPen(QPen(QColor("#dc2626"), 2))
+            painter.setPen(QPen(QColor("#fb7185"), 2))
             painter.drawLine(QPointF(x, track.top() - 3), QPointF(x, track.bottom() + 3))
         painter.end()
 
@@ -144,24 +177,25 @@ class PipelineView(QWidget):
         ("summary", "③ 요약 · Claude (전송)"),
         ("review", "④ 검토"),
     )
-    _STYLE = {
-        "idle": ("#f4f4f5", "#71717a", "normal", ""),
-        "active": ("#dbeafe", "#1d4ed8", "bold", "● "),
-        "done": ("#dcfce7", "#166534", "bold", "✓ "),
-        "error": ("#fee2e2", "#b91c1c", "bold", "✗ "),
-        "skipped": ("#f4f4f5", "#71717a", "normal", "– "),
+    _STYLE = {  # (배경, 글자, 굵기, 앞 표시)
+        "idle": ("#1a1e27", "#8b93a1", "600", ""),
+        "active": ("#132341", "#7aa2ff", "700", "● "),
+        "done": ("#0f2b20", "#4ade80", "700", "✓ "),
+        "error": ("#3a1418", "#f87171", "700", "✗ "),
+        "skipped": ("#1a1e27", "#6f7787", "600", "– "),
     }
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
         self._labels: dict[str, QLabel] = {}
         self.states: dict[str, str] = {}
         for i, (key, _title) in enumerate(self.STEPS):
             if i:
-                arrow = QLabel("→")
-                arrow.setStyleSheet("color: #a1a1aa; font-size: 16px;")
+                arrow = QLabel("›")
+                arrow.setStyleSheet("color: #4b5263; font-size: 18px;")
                 layout.addWidget(arrow)
             label = QLabel()
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -181,7 +215,8 @@ class PipelineView(QWidget):
         label = self._labels[key]
         label.setText(f"{icon}{title}" + (f"\n{detail}" if detail else ""))
         label.setStyleSheet(
-            f"background: {bg}; color: {fg}; font-weight: {weight}; border-radius: 6px; padding: 4px 8px;"
+            f"background: {bg}; color: {fg}; font-weight: {weight}; border: 1px solid {bg}; border-radius: 10px;"
+            " padding: 6px 10px; font-size: 13px;"
         )
 
 

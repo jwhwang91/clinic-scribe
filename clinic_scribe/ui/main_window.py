@@ -17,14 +17,16 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QCloseEvent, QColor, QFont, QGuiApplication
+from PySide6.QtGui import QCloseEvent, QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
+    QBoxLayout,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStackedWidget,
@@ -57,29 +60,41 @@ from clinic_scribe.live_transcriber import LiveTranscriber
 from clinic_scribe.recorder import InputDevice, Recorder, RecorderError, demo_device, list_input_devices
 from clinic_scribe.session import Session, TranscriptRun
 from clinic_scribe.summarizer import ClaudeConfig, SummaryError, summarize
+from clinic_scribe.ui import theme
 from clinic_scribe.ui.settings_dialog import SettingsDialog
-from clinic_scribe.ui.simple_view import SimpleView
+from clinic_scribe.ui.simple_view import HistoryRow, SimpleView
 from clinic_scribe.ui.tasks import Job, Task, TaskRunner
-from clinic_scribe.ui.widgets import LevelMeter, PipelineView, TimelineView, WaveformView
+from clinic_scribe.ui.widgets import BrandMark, LevelMeter, PipelineView, TimelineView, WaveformView
 from clinic_scribe.whisper import TranscriptionResult, WhisperConfig, WhisperError, WhisperRunner, format_time
 
-STATUS_COLORS = {
-    "idle": ("#e5e7eb", "#374151"),
-    "recording": ("#fee2e2", "#b91c1c"),
-    "busy": ("#dbeafe", "#1d4ed8"),
-    "summary": ("#ede9fe", "#6d28d9"),
-    "done": ("#dcfce7", "#166534"),
-    "warn": ("#ffedd5", "#9a3412"),
-    "error": ("#fee2e2", "#b91c1c"),
-}
 PRIVACY_NOTE = (
     "녹음과 전사(whisper.cpp)는 이 Mac 에서만 처리됩니다. "
     "요약을 요청하면 전사문이 Claude Code CLI 를 통해 Claude 서비스(Anthropic)로 전송됩니다. 가상 진료 데이터로만 테스트하세요."
 )
 DRAFT_PLACEHOLDER = "녹음을 마치거나 오디오 파일을 불러오면 이곳에 요약이 표시됩니다."
+# 간단 화면 진료 기록의 상태 칩 색. 그 밖의 짧은 사유(너무 짧음, 요약 취소 등)는 주의 색.
+HISTORY_KINDS = {
+    "전사 중…": "busy",
+    "요약 중…": "summary",
+    "요약 준비됨": "done",
+    "요약 실패": "error",
+    "전사 실패": "error",
+    "전사 완료": "idle",
+    "대기": "idle",
+}
+VIEW_SIZES = {"simple": (1040, 640), "developer": (1400, 900)}  # 화면을 바꿀 때 창 크기
 LIVE_PAD_S = 0.3  # 실시간 미리보기 클립 앞뒤 여유
 KEEP_AUDIO_SESSIONS = 5  # 녹음(16 kHz)을 메모리에 남겨 둘 최근 진료 수 (다시 전사·재생용)
 MAX_SESSIONS = 200
+
+
+def _card(layout_type: type[QBoxLayout], margins: tuple[int, int, int, int] = (14, 12, 14, 12)) -> tuple[QFrame, QBoxLayout]:
+    """둥근 카드(QFrame#card)와 그 안의 레이아웃."""
+    card = QFrame()
+    card.setObjectName("card")
+    layout = layout_type(card)
+    layout.setContentsMargins(*margins)
+    return card, layout
 
 
 def _mmss(seconds: float) -> str:
@@ -130,7 +145,7 @@ class MainWindow(QMainWindow):
         self._silent_warned = False
         self._last_record_second = -1
         self._devices: list[InputDevice] = []
-        self._status: tuple[str, str] = ("대기 중 · 스페이스바로 녹음 시작", "idle")
+        self._status: tuple[str, str] = ("대기 중", "idle")  # 스페이스바 안내는 간단 화면에 따로 있다
         self._demo_device: InputDevice | None = None
         self._demo_error: str | None = None
         if demo_file is not None:
@@ -162,52 +177,72 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         central = QWidget()
-        root = QVBoxLayout(central)
-        root.setSpacing(8)
+        central.setObjectName("devPage")
+        central.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        central.setStyleSheet(theme.stylesheet("#devPage"))
+        page = QVBoxLayout(central)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.setSpacing(0)
 
-        # 입력 장치 줄
-        device_row = QHBoxLayout()
-        device_row.addWidget(QLabel("입력 장치"))
+        # 위 막대: 앱 표시 · 입력 장치 · 권한 · 설정 · 간단히 보기
+        bar = QWidget()
+        bar.setObjectName("topBar")
+        bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        device_row = QHBoxLayout(bar)
+        device_row.setContentsMargins(18, 10, 14, 10)
+        device_row.setSpacing(10)
+        device_row.addWidget(BrandMark())
+        brand = QLabel("clinic-scribe")
+        brand.setObjectName("brand")
+        device_row.addWidget(brand)
+        chip = QLabel("개발자 보기")
+        chip.setObjectName("chip")
+        device_row.addWidget(chip)
+        device_row.addStretch(1)
         self.device_combo = QComboBox()
-        self.device_combo.setMinimumWidth(320)
+        self.device_combo.setMinimumWidth(280)
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
         device_row.addWidget(self.device_combo)
         self.refresh_devices_btn = QPushButton("장치 새로고침")
+        self.refresh_devices_btn.setObjectName("ghost")
         self.refresh_devices_btn.clicked.connect(lambda: self._load_devices(refresh=True))
         device_row.addWidget(self.refresh_devices_btn)
         self.default_device_label = QLabel()
-        self.default_device_label.setStyleSheet("color: gray;")
+        self.default_device_label.setObjectName("subtle")
         device_row.addWidget(self.default_device_label)
-        device_row.addStretch(1)
         self.mic_status_label = QLabel()
+        self.mic_status_label.setObjectName("micStatus")
         device_row.addWidget(self.mic_status_label)
-        settings_btn = QPushButton("설정…")
+        settings_btn = QPushButton("설정")
+        settings_btn.setObjectName("ghost")
         settings_btn.clicked.connect(self._open_settings)
         device_row.addWidget(settings_btn)
         simple_btn = QPushButton("간단히 보기")
+        simple_btn.setObjectName("ghost")
         simple_btn.setToolTip("녹음 버튼과 상태만 보이는 기본 화면으로 돌아갑니다.")
         simple_btn.clicked.connect(lambda: self._set_view("simple"))
         device_row.addWidget(simple_btn)
-        root.addLayout(device_row)
+        page.addWidget(bar)
+
+        body = QWidget()
+        root = QVBoxLayout(body)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(12)
+        page.addWidget(body, 1)
         self.demo_warning = QLabel(
             "데모 입력이 골라져 있습니다. 녹음 버튼을 누르면 데모 오디오 파일이 들어가고 마이크 소리는 녹음되지 않습니다. "
             "내 목소리로 하려면 위 입력 장치를 'MacBook Pro 마이크' 같은 마이크로 바꾸세요."
         )
         self.demo_warning.setWordWrap(True)
-        self.demo_warning.setStyleSheet(
-            "color: #92400e; background: #fef3c7; border: 1px solid #f59e0b; padding: 6px; font-weight: bold;"
-        )
+        self.demo_warning.setStyleSheet(theme.callout("note"))
         self.demo_warning.hide()
         root.addWidget(self.demo_warning)
 
-        # 녹음 줄: 버튼 · 경과 시간 · 입력 파형 · 상태
-        record_row = QHBoxLayout()
+        # 녹음 카드: 버튼 · 경과 시간 · 입력 파형 · 상태 · 파일
+        record_card, record_row = _card(QHBoxLayout)
+        record_row.setSpacing(14)
         self.record_btn = QPushButton()
-        self.record_btn.setMinimumSize(250, 70)
-        font = self.record_btn.font()
-        font.setPointSize(18)
-        font.setBold(True)
-        self.record_btn.setFont(font)
+        self.record_btn.setMinimumSize(210, 64)
         self.record_btn.clicked.connect(self._on_record_clicked)
         record_row.addWidget(self.record_btn)
         self.cancel_rec_btn = QPushButton("녹음 취소")
@@ -216,10 +251,10 @@ class MainWindow(QMainWindow):
         record_row.addWidget(self.cancel_rec_btn)
 
         meter_col = QVBoxLayout()
+        meter_col.setSpacing(4)
         self.elapsed_label = QLabel("00:00")
-        mono = QFont("Menlo")
-        mono.setPointSize(24)
-        self.elapsed_label.setFont(mono)
+        self.elapsed_label.setFont(theme.timer_font(32))
+        self.elapsed_label.setStyleSheet("color: #f1f3f7;")
         self.elapsed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         meter_col.addWidget(self.elapsed_label)
         self.level_meter = LevelMeter()
@@ -232,8 +267,9 @@ class MainWindow(QMainWindow):
         record_row.addWidget(self.waveform, 1)
 
         state_col = QVBoxLayout()
+        state_col.setSpacing(6)
         self.status_badge = QLabel()
-        self.status_badge.setMinimumWidth(250)
+        self.status_badge.setMinimumWidth(240)
         self.status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_badge.setWordWrap(True)
         state_col.addWidget(self.status_badge)
@@ -243,6 +279,7 @@ class MainWindow(QMainWindow):
         record_row.addLayout(state_col)
 
         file_col = QVBoxLayout()
+        file_col.setSpacing(6)
         self.open_btn = QPushButton("오디오 파일 불러오기…")
         self.open_btn.setToolTip("WAV 등 녹음 파일로 같은 전사·요약 과정을 실행합니다 (마이크 없이 테스트).")
         self.open_btn.clicked.connect(self._on_open_file)
@@ -252,15 +289,20 @@ class MainWindow(QMainWindow):
         self.cancel_task_btn.clicked.connect(self._on_cancel_tasks)
         file_col.addWidget(self.cancel_task_btn)
         record_row.addLayout(file_col)
-        root.addLayout(record_row)
+        root.addWidget(record_card)
 
+        # 진행 카드: 단계 + 음성 구간 타임라인
+        progress_card, progress = _card(QVBoxLayout)
+        progress.setSpacing(10)
         self.pipeline = PipelineView()
-        root.addWidget(self.pipeline)
+        progress.addWidget(self.pipeline)
         self.timeline = TimelineView()
-        root.addWidget(self.timeline)
+        progress.addWidget(self.timeline)
+        root.addWidget(progress_card)
 
-        # VAD 옵션 줄
-        vad_row = QHBoxLayout()
+        # 옵션 카드: VAD · 실시간 전사 미리보기
+        options_card, vad_row = _card(QHBoxLayout, (14, 8, 14, 8))
+        vad_row.setSpacing(8)
         v = self.settings.vad
         self.vad_check = QCheckBox("음성 구간 자동 분리 (Silero VAD)")
         self.vad_check.setChecked(self.settings.vad_enabled)
@@ -270,8 +312,12 @@ class MainWindow(QMainWindow):
         self.pad_spin = self._spin(v.speech_pad_ms, 0, 1000, 10, "구간 앞뒤에 더하는 여유. 문장 첫소리·끝소리 잘림을 막습니다.")
         self.min_speech_spin = self._spin(v.min_speech_ms, 30, 2000, 10, "이보다 짧은 소리는 발화로 보지 않습니다. 짧은 대답이 빠지면 줄이세요.")
         for label, spin in (("무음 분리 기준", self.silence_spin), ("구간 앞뒤 여유", self.pad_spin), ("최소 발화", self.min_speech_spin)):
-            vad_row.addWidget(QLabel(label))
+            caption = QLabel(label)
+            caption.setObjectName("muted")
+            vad_row.addSpacing(6)
+            vad_row.addWidget(caption)
             vad_row.addWidget(spin)
+        vad_row.addSpacing(6)
         self.retranscribe_btn = QPushButton("같은 녹음 다시 전사")
         self.retranscribe_btn.setToolTip("현재 VAD 설정으로 같은 녹음을 다시 전사합니다. 이전 결과는 '비교' 탭에서 볼 수 있습니다.")
         self.retranscribe_btn.clicked.connect(self._on_retranscribe)
@@ -286,7 +332,7 @@ class MainWindow(QMainWindow):
         self.live_check.setChecked(self.settings.live_preview)
         self.live_check.toggled.connect(self._on_live_toggled)
         vad_row.addWidget(self.live_check)
-        root.addLayout(vad_row)
+        root.addWidget(options_card)
 
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
@@ -295,6 +341,8 @@ class MainWindow(QMainWindow):
         root.addWidget(self.error_label)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(12)
+        splitter.setChildrenCollapsible(False)
         splitter.addWidget(self._build_transcript_panel())
         splitter.addWidget(self._build_draft_panel())
         splitter.setSizes([660, 660])
@@ -310,6 +358,7 @@ class MainWindow(QMainWindow):
         self.simple.device_combo.setModel(self.device_combo.model())
         self.device_combo.currentIndexChanged.connect(self.simple.device_combo.setCurrentIndex)
         self.simple.device_combo.currentIndexChanged.connect(self.device_combo.setCurrentIndex)
+        self.simple.device_combo.about_to_open.connect(self._refresh_devices_before_popup)
         self.simple.record_clicked.connect(self._on_record_clicked)
         self.simple.retry_clicked.connect(self._on_summary_clicked)
         self.simple.copy_clicked.connect(self._on_copy)
@@ -318,7 +367,10 @@ class MainWindow(QMainWindow):
         self.simple.history_selected.connect(self._on_history_selected)
 
         self.tool_status_label = QLabel()
-        self.tool_status_label.setStyleSheet("color: gray;")
+        self.statusBar().setStyleSheet(
+            "QStatusBar { background: #13161d; border-top: 1px solid #20242e; }"
+            " QLabel { color: #6f7787; font-size: 12px; padding: 2px 8px; }"
+        )
         self.statusBar().addWidget(self.tool_status_label, 1)
         self._on_vad_options_changed()
         self._set_view(self.settings.view_mode)
@@ -334,18 +386,19 @@ class MainWindow(QMainWindow):
         return spin
 
     def _build_transcript_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
+        panel, layout = _card(QVBoxLayout)
+        layout.setSpacing(8)
         header = QHBoxLayout()
         title = QLabel("전사")
-        title.setStyleSheet("font-weight: bold; font-size: 15px;")
+        title.setObjectName("cardTitle")
         header.addWidget(title)
         self.source_label = QLabel()
-        self.source_label.setStyleSheet("color: gray;")
+        self.source_label.setObjectName("subtle")
         header.addWidget(self.source_label)
         header.addStretch(1)
-        header.addWidget(QLabel("결과"))
+        result_caption = QLabel("결과")
+        result_caption.setObjectName("muted")
+        header.addWidget(result_caption)
         self.run_combo = QComboBox()
         self.run_combo.setMinimumWidth(300)
         self.run_combo.currentIndexChanged.connect(lambda _i: self._show_run(self._current_run()))
@@ -353,16 +406,20 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
 
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         self.live_view = QTextBrowser()
         self.tabs.addTab(self.live_view, "실시간 전사")
         self.transcript_view = QTextBrowser()
         self.tabs.addTab(self.transcript_view, "전사문")
+        for view in (self.live_view, self.transcript_view):
+            view.document().setDefaultStyleSheet(theme.DOCUMENT_STYLE)
 
         regions = QWidget()
         rl = QVBoxLayout(regions)
+        rl.setContentsMargins(0, 8, 0, 0)
         self.regions_info = QLabel()
         self.regions_info.setWordWrap(True)
-        self.regions_info.setStyleSheet("color: gray;")
+        self.regions_info.setObjectName("subtle")
         rl.addWidget(self.regions_info)
         self.regions_table = QTableWidget(0, 5)
         self.regions_table.setHorizontalHeaderLabels(["#", "시작", "종료", "길이", "전사"])
@@ -406,15 +463,16 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_draft_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
+        panel, layout = _card(QVBoxLayout)
+        layout.setSpacing(8)
         header = QHBoxLayout()
         self.draft_title = QLabel()
-        self.draft_title.setStyleSheet("font-weight: bold; font-size: 15px;")
+        self.draft_title.setObjectName("cardTitle")
         header.addWidget(self.draft_title)
         header.addStretch(1)
-        header.addWidget(QLabel("요약 종류"))
+        mode_caption = QLabel("요약 종류")
+        mode_caption.setObjectName("muted")
+        header.addWidget(mode_caption)
         self.summary_mode_combo = QComboBox()
         for mode, label in SUMMARY_MODES.items():
             self.summary_mode_combo.addItem(label, mode)
@@ -428,24 +486,24 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
         privacy = QLabel(PRIVACY_NOTE)
         privacy.setWordWrap(True)
-        privacy.setStyleSheet("color: #92400e; background: #fffbeb; border: 1px solid #fcd34d; padding: 4px;")
+        privacy.setStyleSheet(theme.callout("note"))
         layout.addWidget(privacy)
         self.draft_basis_label = QLabel()
-        self.draft_basis_label.setStyleSheet("color: gray;")
+        self.draft_basis_label.setObjectName("subtle")
         self.draft_basis_label.setWordWrap(True)
         layout.addWidget(self.draft_basis_label)
         self.summary_error_label = QLabel()
         self.summary_error_label.setWordWrap(True)
         self.summary_error_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.summary_error_label.setStyleSheet(
-            "color: #991b1b; background: #fef2f2; border: 1px solid #fca5a5; padding: 6px;"
-        )
+        self.summary_error_label.setStyleSheet(theme.callout("error"))
         self.summary_error_label.hide()
         layout.addWidget(self.summary_error_label)
         self.draft_view = QTextBrowser()
+        self.draft_view.document().setDefaultStyleSheet(theme.DOCUMENT_STYLE)
         layout.addWidget(self.draft_view, 1)
         buttons = QHBoxLayout()
         self.summary_btn = QPushButton("요약 요청")
+        self.summary_btn.setObjectName("primary")
         self.summary_btn.setToolTip("선택한 전사 결과로 요약을 (다시) 만듭니다. 다시 녹음할 필요가 없습니다.")
         self.summary_btn.clicked.connect(self._on_summary_clicked)
         buttons.addWidget(self.summary_btn)
@@ -469,8 +527,15 @@ class MainWindow(QMainWindow):
     def _set_view(self, mode: str) -> None:
         self.settings.view_mode = mode if mode in ("simple", "developer") else "simple"
         simple = self.settings.view_mode == "simple"
-        self.stack.setCurrentWidget(self.simple if simple else self.dev_page)
+        current = self.simple if simple else self.dev_page
+        # 가려진 화면의 최소 크기가 창 크기를 붙잡지 않게 한다 (간단 화면 창을 작게 쓰기 위해).
+        for page in (self.simple, self.dev_page):
+            policy = QSizePolicy.Policy.Preferred if page is current else QSizePolicy.Policy.Ignored
+            page.setSizePolicy(policy, policy)
+        self.stack.setCurrentWidget(current)
         self.statusBar().setVisible(not simple)
+        if not (self.isMaximized() or self.isFullScreen()):
+            self.resize(*VIEW_SIZES[self.settings.view_mode])
 
     # -------------------------------------------------------- 스페이스바 토글
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
@@ -532,11 +597,8 @@ class MainWindow(QMainWindow):
             text, kind = f"이전 진료 처리 중 {len(background)}건", "busy"
         else:
             text, kind = self._status
-        bg, fg = STATUS_COLORS.get(kind, STATUS_COLORS["idle"])
         self.status_badge.setText(text)
-        self.status_badge.setStyleSheet(
-            f"background: {bg}; color: {fg}; border-radius: 6px; padding: 6px 10px; font-weight: bold;"
-        )
+        self.status_badge.setStyleSheet(theme.pill(kind, 14))
         self.simple.set_status(text, kind)
         self._refresh_pipeline()
         busy = bool(self._tasks)
@@ -591,12 +653,7 @@ class MainWindow(QMainWindow):
             p.set_step("review", "idle")
 
     def _show_error(self, message: str, warn: bool = False) -> None:
-        style = (
-            "color: #9a3412; background: #fff7ed; border: 1px solid #fdba74; padding: 6px;"
-            if warn
-            else "color: #991b1b; background: #fef2f2; border: 1px solid #fca5a5; padding: 6px;"
-        )
-        self.error_label.setStyleSheet(style)
+        self.error_label.setStyleSheet(theme.callout("warn" if warn else "error"))
         self.error_label.setText(message)
         self.error_label.show()
         self.simple.set_error(message, warn)
@@ -616,10 +673,7 @@ class MainWindow(QMainWindow):
         transcribing = self._task(s, "transcribe") is not None
 
         self.record_btn.setText("■  종료하고 요약" if recording else "●  녹음 시작")
-        self.record_btn.setStyleSheet(
-            "background: #dc2626; color: white; border-radius: 8px;" if recording
-            else "background: #2563eb; color: white; border-radius: 8px;"
-        )
+        self.record_btn.setStyleSheet(theme.record_button(recording))
         self.record_btn.setEnabled(not self._waiting_permission and (recording or bool(self._devices)))
         self.cancel_rec_btn.setEnabled(recording)
         self.device_combo.setEnabled(not recording)
@@ -645,22 +699,23 @@ class MainWindow(QMainWindow):
         self._refresh_status_badge()
 
     def _refresh_history(self) -> None:
-        rows = [(sess.session_id, self._history_line(sess)) for sess in reversed(self.sessions)]
+        rows = [self._history_row(sess) for sess in reversed(self.sessions)]
         self.simple.set_history(rows, self.session.session_id if self.session else None)
 
-    def _history_line(self, sess: Session) -> str:
+    def _history_row(self, sess: Session) -> HistoryRow:
         start = sess.created_at.strftime("%H:%M")
         if sess is self._recording_session and self.recorder.active:
-            return f"#{sess.session_id}   {start}~   ● 녹음 중"
+            return HistoryRow(sess.session_id, f"{start} ~", "녹음 중", "recording")
         if sess.source.startswith("파일"):
-            span = f"{start}   {sess.source}"
+            when = f"{start} · {sess.source}"
         elif sess.duration_s > 0:
             end = (sess.created_at + timedelta(seconds=sess.duration_s)).strftime("%H:%M")
-            span = f"{start}–{end} ({_mmss(sess.duration_s)})"
+            when = f"{start}–{end} · {_mmss(sess.duration_s)}"
         else:
-            span = start
-        reason = f"   · {sess.end_reason}" if sess.end_reason and sess.end_reason != "직접 종료" else ""
-        return f"#{sess.session_id}   {span}   {self._session_status(sess)}{reason}"
+            when = start
+        status = self._session_status(sess)
+        note = sess.end_reason if sess.end_reason and sess.end_reason != "직접 종료" else ""
+        return HistoryRow(sess.session_id, when, status, HISTORY_KINDS.get(status, "warn"), note)
 
     def _session_status(self, sess: Session) -> str:
         if self._task(sess, "transcribe"):
@@ -682,7 +737,7 @@ class MainWindow(QMainWindow):
     def _refresh_mic_status(self) -> None:
         status = mic_permission.authorization_status()
         label = mic_permission.STATUS_LABEL.get(status, status)
-        color = {"authorized": "#166534", "denied": "#b91c1c", "restricted": "#b91c1c"}.get(status, "#6b7280")
+        color = {"authorized": "#4ade80", "denied": "#f87171", "restricted": "#f87171"}.get(status, "#8b93a1")
         tip = f"권한을 받는 앱: {mic_permission.host_app_name()}\n확인 위치: {mic_permission.SETTINGS_PATH}"
         for target in (self.mic_status_label, self.simple.mic_status):
             target.setText(f"마이크 권한: {label}")
@@ -710,11 +765,14 @@ class MainWindow(QMainWindow):
     def _refresh_auto_split_note(self) -> None:
         s = self.settings
         if s.auto_split:
-            cues = ", ".join(f"'{c}'" for c in parse_cues(s.split_cues_next)[:2])
-            text = f"자동 나누기 켜짐 · 말 없이 {s.split_silence_s}초가 지나거나 다음 환자 신호({cues} 등)가 나오면 다음 진료로 넘어갑니다"
+            cues = parse_cues(s.split_cues_next)
+            first = f"'{cues[0]}' 같은 말이 나오거나 " if cues else ""
+            text = f"자동 나누기 켜짐 · {first}{s.split_silence_s}초 동안 말이 없으면 다음 진료로 넘어갑니다"
+            tip = "다음 환자 신호: " + ", ".join(cues) + "\n끝인사: " + ", ".join(parse_cues(s.split_cues_end))
         else:
-            text = "자동 나누기 꺼짐 · 스페이스바로만 진료를 끝냅니다"
+            text, tip = "자동 나누기 꺼짐 · 스페이스바로만 진료를 끝냅니다", ""
         self.simple.auto_split_note.setText(text)
+        self.simple.auto_split_note.setToolTip(tip)
 
     # ------------------------------------------------------------ 입력 장치
     def _load_devices(self, refresh: bool) -> None:
@@ -745,6 +803,11 @@ class MainWindow(QMainWindow):
             self._show_error("사용할 수 있는 입력 장치가 없습니다. 마이크를 연결한 뒤 '장치 새로고침'을 누르거나, 오디오 파일을 불러와 테스트하세요.", warn=True)
         self._refresh_demo_warning()
         self._refresh_controls()
+
+    def _refresh_devices_before_popup(self) -> None:
+        # 간단 화면에는 '장치 새로고침' 버튼이 없으므로, 목록을 펼칠 때 새로 꽂은 마이크까지 다시 읽는다.
+        if not self.recorder.active:
+            self._load_devices(refresh=True)
 
     def _selected_device(self) -> InputDevice | None:
         index = self.device_combo.currentData()
@@ -940,7 +1003,7 @@ class MainWindow(QMainWindow):
             self._refresh_pipeline()
         speaking = self.live.in_speech
         self.live_indicator.setText("● 말하는 중" if speaking else "○ 조용함")
-        self.live_indicator.setStyleSheet("color: #15803d; font-weight: bold;" if speaking else "color: gray;")
+        self.live_indicator.setStyleSheet("color: #4ade80; font-weight: bold;" if speaking else "color: gray;")
         if not self._silent_warned and self.recorder.looks_digitally_silent():
             self._silent_warned = True
             self._show_error(mic_permission.silent_input_message(), warn=True)
@@ -1094,31 +1157,31 @@ class MainWindow(QMainWindow):
 
     def _render_live(self) -> None:
         note = (
-            '<p style="color:#6b7280;">실시간 미리보기 · 말이 끊길 때마다 그 부분만 whisper.cpp 로 전사합니다(이 Mac). '
+            '<p style="color:#8b93a1;">실시간 미리보기 · 말이 끊길 때마다 그 부분만 whisper.cpp 로 전사합니다(이 Mac). '
             "앞뒤 문맥 없이 짧게 전사해 정확도가 낮을 수 있으며, 진료가 끝나면 그 진료 녹음 전체로 다시 전사한 결과가 "
             "'전사문' 탭에 나옵니다.</p>"
         )
         rows = [note]
         if self._live_issue:
-            rows.append(f'<p style="color:#b91c1c;">{html.escape(self._live_issue)}</p>')
+            rows.append(f'<p style="color:#f87171;">{html.escape(self._live_issue)}</p>')
         if not self.live_check.isChecked():
-            rows.append('<p style="color:#9a3412;">실시간 전사 미리보기가 꺼져 있습니다.</p>')
+            rows.append('<p style="color:#fdba74;">실시간 전사 미리보기가 꺼져 있습니다.</p>')
         if not self._live_entries:
             message = ("말을 하면 여기에 바로 나타납니다…" if self.recorder.active
                        else "‘● 녹음 시작’(또는 스페이스바)을 누르고 말하면, 말이 끊길 때마다 그 부분이 여기에 바로 전사됩니다.")
-            rows.append(f'<p style="color:#6b7280;">{message}</p>')
+            rows.append(f'<p style="color:#8b93a1;">{message}</p>')
         for entry in self._live_entries:
             if entry.status == "split":
-                rows.append(f'<p style="color:#6b7280;border-top:1px solid #d4d4d8;">── {html.escape(entry.text)} ──</p>')
+                rows.append(f'<p style="color:#8b93a1;border-top:1px solid #2a2f3a;">── {html.escape(entry.text)} ──</p>')
                 continue
             end = f" → {format_time(entry.end)}" if entry.end is not None else ""
-            stamp = f'<span style="color:#6b7280;font-family:Menlo;">[{format_time(entry.start)}{end}]</span>'
+            stamp = f'<span style="color:#8b93a1;font-family:Menlo;">[{format_time(entry.start)}{end}]</span>'
             body = {
-                "listening": '<span style="color:#15803d;">● 말하는 중…</span>',
-                "pending": '<span style="color:#1d4ed8;">인식 중…</span>',
-                "off": '<span style="color:#6b7280;">(미리보기 꺼짐)</span>',
-                "stopped": '<span style="color:#6b7280;">녹음 종료 — 최종 전사에서 처리</span>',
-                "error": f'<span style="color:#b91c1c;">미리보기 실패: {html.escape(entry.text)}</span>',
+                "listening": '<span style="color:#4ade80;">● 말하는 중…</span>',
+                "pending": '<span style="color:#93a8f8;">인식 중…</span>',
+                "off": '<span style="color:#8b93a1;">(미리보기 꺼짐)</span>',
+                "stopped": '<span style="color:#8b93a1;">녹음 종료 — 최종 전사에서 처리</span>',
+                "error": f'<span style="color:#f87171;">미리보기 실패: {html.escape(entry.text)}</span>',
             }.get(entry.status, html.escape(entry.text))
             rows.append(f"<p>{stamp}&nbsp; {body}</p>")
         self.live_view.setHtml("".join(rows))
@@ -1475,7 +1538,7 @@ class MainWindow(QMainWindow):
                 message = s.summary_note
             else:
                 message = DRAFT_PLACEHOLDER
-            placeholder = f'<p style="color:#6b7280;">{html.escape(message)}</p>'
+            placeholder = f'<p style="color:#8b93a1;">{html.escape(message)}</p>'
             self.draft_view.setHtml(placeholder)
             self.simple.summary_view.setHtml(placeholder)
         self._refresh_controls()
@@ -1519,26 +1582,26 @@ class MainWindow(QMainWindow):
     def _transcript_html(self, run: TranscriptRun | None) -> str:
         if run is None:
             if self._task(self.session, "transcribe") is not None:
-                return '<p style="color:#6b7280;">전사 중…</p>'
+                return '<p style="color:#8b93a1;">전사 중…</p>'
             if self.session is not None and self.session is self._recording_session and self.recorder.active:
-                return '<p style="color:#6b7280;">녹음 중입니다. 진료가 끝나면 이 진료 녹음 전체를 전사해 여기에 보여 줍니다.</p>'
-            return '<p style="color:#6b7280;">녹음을 마치거나 오디오 파일을 불러오면 타임스탬프가 있는 전사문이 표시됩니다.</p>'
+                return '<p style="color:#8b93a1;">녹음 중입니다. 진료가 끝나면 이 진료 녹음 전체를 전사해 여기에 보여 줍니다.</p>'
+            return '<p style="color:#8b93a1;">녹음을 마치거나 오디오 파일을 불러오면 타임스탬프가 있는 전사문이 표시됩니다.</p>'
         r = run.result
-        head = (f'<p style="color:#6b7280;">{html.escape(run.label)} · 녹음 {format_time(r.audio_duration)} · '
+        head = (f'<p style="color:#8b93a1;">{html.escape(run.label)} · 녹음 {format_time(r.audio_duration)} · '
                 f"처리 {r.elapsed:.1f}초 · 시각은 이 진료 녹음 기준</p>")
         if not r.segments:
             note = "음성이 감지되지 않았습니다." if r.no_speech_detected else "전사된 발화가 없습니다."
-            return head + f'<p style="color:#6b7280;">{note}</p>'
+            return head + f'<p style="color:#8b93a1;">{note}</p>'
         rows = [head]
         for seg in r.segments:
             stamp = f"[{format_time(seg.start)} → {format_time(seg.end)}]"
             text = html.escape(seg.text)
             if not seg.speech_detected:
                 rows.append(
-                    f'<p style="background:#ffedd5;color:#9a3412;">{stamp} ⚠ 음성이 감지되지 않은 곳의 전사(환각 의심): {text}</p>'
+                    f'<p style="background:#3a2410;color:#fdba74;">{stamp} ⚠ 음성이 감지되지 않은 곳의 전사(환각 의심): {text}</p>'
                 )
             else:
-                rows.append(f'<p><span style="color:#6b7280;font-family:Menlo;">{stamp}</span>&nbsp; {text}</p>')
+                rows.append(f'<p><span style="color:#8b93a1;font-family:Menlo;">{stamp}</span>&nbsp; {text}</p>')
         return "".join(rows)
 
     def _fill_regions(self, run: TranscriptRun | None) -> None:
@@ -1569,7 +1632,7 @@ class MainWindow(QMainWindow):
             rows = [(str(i + 1), reg.start, reg.end, r.region_text(i), False) for i, reg in enumerate(r.regions)]
             rows += [("⚠", seg.start, seg.end, seg.text, True) for seg in r.segments if seg.region is None]
             rows.sort(key=lambda row: row[1])
-        warn_bg = QColor("#ffedd5")
+        warn_bg = QColor("#3a2410")
         for label, start, end, text, suspicious in rows:
             row = table.rowCount()
             table.insertRow(row)
@@ -1579,7 +1642,7 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.ItemDataRole.UserRole, (start, end))
                 if suspicious:
                     item.setBackground(warn_bg)
-                    item.setForeground(QColor("#9a3412"))
+                    item.setForeground(QColor("#fdba74"))
                 table.setItem(row, col, item)
         table.resizeRowsToContents()
 
@@ -1587,7 +1650,7 @@ class MainWindow(QMainWindow):
         s = self.session
         for combo, view in ((self.compare_a, self.compare_view_a), (self.compare_b, self.compare_view_b)):
             run = s.run(combo.currentData()) if s else None
-            view.setHtml(self._transcript_html(run) if run else '<p style="color:#6b7280;">같은 녹음을 VAD 설정을 바꿔 다시 전사하면 여기서 나란히 비교할 수 있습니다.</p>')
+            view.setHtml(self._transcript_html(run) if run else '<p style="color:#8b93a1;">같은 녹음을 VAD 설정을 바꿔 다시 전사하면 여기서 나란히 비교할 수 있습니다.</p>')
 
     def _play_selected_region(self) -> None:
         s = self.session
@@ -1612,6 +1675,7 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------- 설정
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)
+        dialog.setStyleSheet(theme.stylesheet("SettingsDialog"))
         if dialog.exec():
             dialog.apply()
             self.settings.save()
@@ -1624,9 +1688,14 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------- 종료
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         unexported = [s for s in self.sessions if s.has_results and not s.exported]
-        if unexported and not self._confirm(
-            "종료", f"내보내지 않은 진료 결과가 {len(unexported)}건 있습니다. 종료하면 사라집니다. 종료할까요?"
-        ):
+        question = ""
+        if self.recorder.active and unexported:
+            question = f"녹음 중이고, 내보내지 않은 진료 결과도 {len(unexported)}건 있습니다. 종료하면 모두 사라집니다. 종료할까요?"
+        elif self.recorder.active:
+            question = "녹음 중입니다. 지금 종료하면 이번 녹음은 사라집니다. 종료할까요?"
+        elif unexported:
+            question = f"내보내지 않은 진료 결과가 {len(unexported)}건 있습니다. 종료하면 사라집니다. 종료할까요?"
+        if question and not self._confirm("종료", question):
             event.ignore()
             return
         self.shutdown()

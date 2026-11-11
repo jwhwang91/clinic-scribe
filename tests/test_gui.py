@@ -203,6 +203,20 @@ def test_cancel_recording_releases_microphone(window, qapp):
     assert window.record_btn.text().endswith("녹음 시작")
 
 
+def test_closing_while_recording_asks_first(window, qapp, monkeypatch):
+    FakeInputStream.source = np.zeros(48000 * 5, np.float32) + 1e-3
+    window.record_btn.click()
+    assert window.recorder.active
+    questions = []
+    monkeypatch.setattr(window, "_confirm", lambda title, text: questions.append(text) or False)
+    window.close()  # 아니오: 창과 녹음을 그대로 둔다
+    assert window.isVisible() and window.recorder.active
+    assert "녹음 중입니다" in questions[-1]
+    monkeypatch.setattr(window, "_confirm", lambda title, text: True)
+    window.close()
+    assert not window.isVisible() and not window.recorder.active
+
+
 def test_digital_silence_warns_about_permission(window, qapp, monkeypatch):
     # 아주 작은 잡음이라도 들어오면 정상 입력으로 본다.
     FakeInputStream.source = np.full(48000 * 3, 1e-3, np.float32)
@@ -367,6 +381,76 @@ def test_simple_view_space_bar_and_hidden_results(qapp, monkeypatch, samples, tm
         assert w.stack.currentWidget() is w.dev_page and w.settings.view_mode == "developer"
     finally:
         w.shutdown()
+
+
+def test_simple_view_rereads_devices_when_list_opens(window, qapp, monkeypatch):
+    from clinic_scribe.ui import main_window
+
+    usb = recorder.InputDevice(index=9, name="USB 마이크", channels=1, default_samplerate=44100, is_default=False)
+    calls = []
+
+    def fake_list(refresh=False):
+        calls.append(refresh)
+        return [FAKE_DEVICE, usb]
+
+    monkeypatch.setattr(main_window, "list_input_devices", fake_list)
+    combo = window.simple.device_combo
+    combo.showPopup()
+    combo.hidePopup()
+    assert calls == [True]  # 목록을 펼칠 때 앱을 켠 뒤 꽂은 장치까지 다시 읽는다
+    assert any("USB 마이크" in combo.itemText(i) for i in range(combo.count()))
+    assert combo.currentText().startswith(FAKE_DEVICE.name)  # 고른 장치는 그대로
+    FakeInputStream.source = np.zeros(48000 * 3, np.float32) + 1e-3
+    window.record_btn.click()
+    combo.showPopup()
+    combo.hidePopup()
+    assert calls == [True]  # 녹음 중에는 장치를 다시 읽지 않는다
+    window._on_cancel_recording()
+
+
+def test_simple_view_draws_every_state(qapp, capfd):
+    from clinic_scribe.ui.simple_view import HistoryRow, SimpleView
+
+    view = SimpleView()
+    view.resize(1100, 900)
+    view.show()
+    view.set_history(
+        [
+            HistoryRow(2, "10:12 ~", "녹음 중", "recording"),
+            HistoryRow(1, "10:02–10:11 · 09:05", "요약 준비됨", "done", "다음 환자 신호 '들어오세요'"),
+        ],
+        1,
+    )
+    assert view.history.item(1).text() == "진료 #1 · 10:02–10:11 · 09:05 · 요약 준비됨 · 다음 환자 신호 '들어오세요'"
+    for recording in (False, True):
+        view.set_recording(recording, True)
+        view.level.set_level(-20.0)
+        view.set_status("● 녹음 중", "recording")
+        view.set_error("요약 실패: 사용량 제한", warn=True)
+        view.show_summary_btn.setEnabled(True)
+        view.show_summary_btn.setChecked(True)
+        assert not view.grab().isNull()
+    view.set_recording(False, False)  # 권한 요청 중 등 누를 수 없는 상태
+    view.level.set_level(-120.0)
+    assert not view.grab().isNull()
+    view.close()
+    assert "Traceback" not in capfd.readouterr().err  # 직접 그리는 버튼·막대·기록 줄에서 예외가 없었다
+
+
+def test_space_bar_through_window_toggles_once(window, qapp):
+    """실제 키 입력처럼 창(QWindow)을 거쳐 위젯으로 전달돼도, 한 번 누르면 한 번만 바뀐다."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    FakeInputStream.source = np.zeros(48000 * 3, np.float32) + 1e-3
+    handle = window.windowHandle()
+    assert handle is not None
+    space = Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier, " "
+    qapp.sendEvent(handle, QKeyEvent(QEvent.Type.KeyPress, *space))
+    assert window.recorder.active
+    qapp.sendEvent(handle, QKeyEvent(QEvent.Type.KeyRelease, *space))
+    assert window.recorder.active  # 손을 떼는 것으로는 바뀌지 않는다
+    window._on_cancel_recording()
 
 
 def test_space_bar_leaves_text_fields_and_dialogs_alone(window, qapp, monkeypatch):

@@ -68,22 +68,22 @@ class ConversationSummary:
     def to_html(self, include_evidence: bool = True) -> str:
         e = html.escape
         parts = [
-            '<div style="background:#eff6ff;border:1px solid #93c5fd;padding:6px 8px;color:#1e3a8a;">'
+            '<div style="background:#1b2240;border:1px solid #3b4a8a;padding:6px 8px;color:#c7d2fe;">'
             f"<b>{e(GENERAL_BANNER)}</b></div>",
             f'<p style="font-size:large;"><b>{e(self.one_line or "요약할 내용이 없습니다.")}</b></p>',
             '<h3 style="margin:12px 0 4px 0;">주요 내용</h3>',
         ]
         for group in self.key_points:
-            parts.append(f'<p style="margin:8px 0 2px 0;color:#1d4ed8;"><b>{e(group.category)}</b></p><ul style="margin-top:0;">')
+            parts.append(f'<p style="margin:8px 0 2px 0;color:#93a8f8;"><b>{e(group.category)}</b></p><ul style="margin-top:0;">')
             parts += [f"<li>{e(item)}</li>" for item in group.items]
             parts.append("</ul>")
         if not self.key_points:
-            parts.append('<p style="color:#777;">없음</p>')
+            parts.append('<p style="color:#8b93a1;">없음</p>')
         for title, items in (("할 일·결정 사항", self.action_items), ("확인 필요", self.needs_review)):
             parts.append(f'<h3 style="margin:12px 0 4px 0;">{e(title)}</h3><ul style="margin-top:0;">')
-            parts += [f"<li>{e(item)}</li>" for item in items] or ['<li style="color:#777;">없음</li>']
+            parts += [f"<li>{e(item)}</li>" for item in items] or ['<li style="color:#8b93a1;">없음</li>']
             parts.append("</ul>")
-        parts.append(f'<p style="color:#6b7280;">(자동 요약 · {e(self.created_at)} · {e(self.model)} · {e(self.based_on)})</p>')
+        parts.append(f'<p style="color:#8b93a1;">(자동 요약 · {e(self.created_at)} · {e(self.model)} · {e(self.based_on)})</p>')
         return "".join(parts)
 
 

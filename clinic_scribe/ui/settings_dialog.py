@@ -93,6 +93,8 @@ class SettingsDialog(QDialog):
         self.cues_next.setToolTip("쉼표로 구분. 이 말이 나오면 그 말부터 새 진료로 봅니다. 띄어쓰기는 무시합니다.")
         self.cues_end = QLineEdit(s.split_cues_end)
         self.cues_end.setToolTip("쉼표로 구분. 이 말이 나오면 그 말까지를 앞 진료로 봅니다. 띄어쓰기는 무시합니다.")
+        for edit in (self.cues_next, self.cues_end):
+            edit.setMinimumWidth(460)  # 신호 목록 전체가 한눈에 보이게
         self.min_session = QSpinBox()
         self.min_session.setRange(0, 600)
         self.min_session.setSuffix(" 초")

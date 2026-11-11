@@ -87,29 +87,29 @@ class ChartDraft:
     def to_html(self, include_evidence: bool = True) -> str:
         e = html.escape
         parts = [
-            '<div style="background:#fff4e5;border:1px solid #f0b46a;padding:6px 8px;color:#7a4100;">'
+            '<div style="background:#33240f;border:1px solid #f0b46a;padding:6px 8px;color:#fbbf24;">'
             f"<b>{e(REVIEW_BANNER)}</b></div>"
         ]
         if not any(self.sections.get(key) for key in CLINICAL_KEYS):
             parts.append(
-                '<p style="color:#1d4ed8;">대화에서 진료 관련 내용을 찾지 못했습니다. 차트에는 증상·진찰·평가·계획만 정리하므로 '
+                '<p style="color:#93a8f8;">대화에서 진료 관련 내용을 찾지 못했습니다. 차트에는 증상·진찰·평가·계획만 정리하므로 '
                 "일상 대화는 비어 보이는 것이 정상입니다. 말한 내용 전체는 왼쪽 '전사문' 탭에서 확인하세요.</p>"
             )
         for key, title in SECTIONS:
             parts.append(f'<h3 style="margin:12px 0 4px 0;">{e(title)}</h3><ul style="margin-top:0;">')
             items = self.sections.get(key, [])
             if not items:
-                parts.append(f'<li style="color:#777;">{e(EMPTY_SECTION)}</li>')
+                parts.append(f'<li style="color:#8b93a1;">{e(EMPTY_SECTION)}</li>')
             for item in items:
-                color = "#9a3412" if item.auto else "inherit"
+                color = "#fdba74" if item.auto else "inherit"
                 body = f'<span style="color:{color};">{e(_item_line(item))}</span>'
                 if item.warnings:
-                    body += f' <span style="color:#b91c1c;">⚠ {e("; ".join(item.warnings))}</span>'
+                    body += f' <span style="color:#f87171;">⚠ {e("; ".join(item.warnings))}</span>'
                 if include_evidence and item.evidence:
-                    body += f'<br><span style="color:#6b7280;font-size:small;">근거: “{e(item.evidence)}”</span>'
+                    body += f'<br><span style="color:#8b93a1;font-size:small;">근거: “{e(item.evidence)}”</span>'
                 parts.append(f"<li>{body}</li>")
             parts.append("</ul>")
-        parts.append(f'<p style="color:#6b7280;">{e(SPEAKER_NOTE)}<br>'
+        parts.append(f'<p style="color:#8b93a1;">{e(SPEAKER_NOTE)}<br>'
                      f"(검토용 초안 · {e(self.created_at)} · {e(self.model)} · {e(self.based_on)})</p>")
         return "".join(parts)
 
