@@ -14,6 +14,7 @@ VAD 를 끄고 전사할 때도 음성 구간을 구해, 음성이 없는 곳에
 줄 나누기: Whisper 는 짧게 주고받는 질문과 대답을 한 줄로 받아 적곤 한다(힌트에 따라 달라짐). 그래서 VAD 전사는
         단어 단위(-ml 1 -sow, 시각은 원본 기준)로 받아, 짧은 쉼(0.3초)으로 나뉜 말 덩어리마다 묶고,
         문장이 끝났거나 쉼이 1초 이상이거나 말한 사람이 바뀌면 새 줄로 한다. 받아 적는 글자는 같다(-ml 은 후처리).
+        말 덩어리는 낱말(원본 시각)을 함께 들고 있어, 쉼 없이 끼어든 말은 화자 인식이 덩어리를 나눈다(speakers.split_turns).
         토큰 시각(-ojf)은 VAD 로 무음을 뺀 시각이라 쓰지 않는다.
 """
 
@@ -73,6 +74,8 @@ class TranscriptSegment:
     speaker: str | None = None  # 말한 사람: 등록한 의사 이름 / "환자"(등록되지 않은 목소리) / None(판단 안 함)
     original_text: str | None = None  # 딕션 사전으로 고치기 전 Whisper 가 받아 적은 그대로 (고친 줄만)
     corrections: list[str] = field(default_factory=list)  # 적용한 교정 ("잘못 들린 말 → 바른 말")
+    # 말 덩어리를 이룬 낱말 (원본 시각). 덩어리 안에서 말한 사람이 바뀌면 나눌 때 쓴다. 줄에는 비어 있다.
+    words: list[TranscriptSegment] = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -297,18 +300,24 @@ def group_words(words: list[TranscriptSegment], pauses: list[SpeechRegion]) -> l
         if index + 1 < len(pauses) and ends and ends[-1] < len(group) - 1:
             buckets[index] = group[: ends[-1] + 1]
             buckets[index + 1] = group[ends[-1] + 1 :] + buckets.get(index + 1, [])
-    phrases = []
-    for index in sorted(buckets):
-        group = buckets[index]
-        probs = [w.confidence for w in group if w.confidence is not None]
-        phrases.append(TranscriptSegment(
-            start=pauses[index].start,
-            end=pauses[index].end,
-            text=" ".join(w.text.strip() for w in group),
-            confidence=sum(probs) / len(probs) if probs else None,
-            uncertain_terms=[term for w in group for term in w.uncertain_terms],
-        ))
-    return phrases
+    return [phrase_from_words(buckets[i], pauses[i].start, pauses[i].end) for i in sorted(buckets) if buckets[i]]
+
+
+def ends_sentence(text: str) -> bool:
+    return bool(_SENTENCE_END.search(text))
+
+
+def phrase_from_words(words: list[TranscriptSegment], start: float, end: float) -> TranscriptSegment:
+    """낱말들을 [start, end] 의 말 덩어리 하나로 잇는다."""
+    probs = [w.confidence for w in words if w.confidence is not None]
+    return TranscriptSegment(
+        start=start,
+        end=end,
+        text=" ".join(w.text.strip() for w in words),
+        confidence=sum(probs) / len(probs) if probs else None,
+        uncertain_terms=[term for w in words for term in w.uncertain_terms],
+        words=list(words),
+    )
 
 
 def merge_phrases(phrases: list[TranscriptSegment], break_gap: float = LINE_BREAK_GAP_S) -> list[TranscriptSegment]:
@@ -333,7 +342,7 @@ def merge_phrases(phrases: list[TranscriptSegment], break_gap: float = LINE_BREA
                     speaker=prev.speaker or phrase.speaker,
                 )
                 continue
-        lines.append(dataclasses.replace(phrase))
+        lines.append(dataclasses.replace(phrase, words=[]))
     return lines
 
 

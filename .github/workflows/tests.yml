@@ -69,6 +69,8 @@ jobs:
           # GitHub 컴퓨터는 GPU 없이 CPU 4개라 전사가 느리다: 가짜 마이크를 실제 속도로, 기다리는 시간은 5배로
           CLINIC_SCRIBE_TEST_SPEED: "1"
           CLINIC_SCRIBE_TEST_PATIENCE: "5"
+          # 테스트가 모두 끝난 뒤 Python 이 닫히다 비정상 종료하면(Windows 에서 본 일) 어디서였는지 로그에 남긴다
+          PYTHONFAULTHANDLER: "1"
         run: |
           if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
           # 테스트 하나가 5분을 넘으면 모든 스레드가 어디서 멈췄는지 로그에 남긴다

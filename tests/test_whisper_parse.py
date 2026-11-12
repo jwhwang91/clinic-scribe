@@ -136,6 +136,8 @@ def test_group_words_into_phrases_by_short_pauses():
     assert [p.text for p in phrases] == ["어디가 불편해서 오셨어요?", "사흘 전부터 없어요.", "토하거나 네."]
     assert [(p.start, p.end) for p in phrases] == [(0.75, 3.12), (3.63, 7.19), (7.95, 11.19)]
     assert phrases[1].confidence == pytest.approx((0.5 + 0.9 + 0.9) / 3) and phrases[1].uncertain_terms == ["3"]
+    assert [w.text for w in phrases[2].words] == ["토하거나", "네."]  # 덩어리 안 낱말과 시각도 남긴다 (말한 사람이 바뀌면 나눌 때)
+    assert phrases[2].words[0].start == 7.34
     assert group_words(words, []) == [w for w in words if w.text]
 
 
@@ -160,6 +162,7 @@ def test_merge_phrases_breaks_at_sentence_end_long_pause_and_speaker_change():
         ("약은 하루 세 번 식후에 드세요.", "김원장"),
     ]
     assert (lines[1].start, lines[1].end) == (2.5, 5.0)
+    assert all(line.words == [] for line in merge_phrases(group_words([word(0.8, 1.2, "네.")], [SpeechRegion(0.7, 1.3)])))
     assert phrases[1].text == "사흘 전부터 속이"  # 원래 덩어리는 바꾸지 않는다
     two = merge_phrases([phrase(0, 2, "네 알겠습니다", "환자"), phrase(2.3, 4, "약은 식후에 드세요", "김원장")])
     assert [line.speaker for line in two] == ["환자", "김원장"]

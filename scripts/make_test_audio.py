@@ -27,7 +27,7 @@ from clinic_scribe.training import DEFAULT_PROMPTS  # noqa: E402  (따라 읽기
 VOICES = {"patient": ("Yuna", 1.0), "doctor": ("Yuna", 0.84), "other": ("Daniel", 1.0)}
 WORK_SR = 48000
 
-# (화자, 대사, 이 대사 뒤 쉼 초)
+# (화자, 대사, 이 대사 뒤 쉼 초). 쉼이 음수면 다음 대사가 그만큼 겹쳐 시작한다 (말을 끊고 들어옴).
 SHORT_CONSULT = [
     ("patient", "사흘 전부터 식후에 속이 쓰려요. 열은 없어요.", 1.0),
     ("doctor", "오늘은 경과를 보고, 계속되면 검사를 논의하죠.", 0.0),
@@ -68,6 +68,22 @@ TWO_PATIENTS = [
     ("doctor", "네, 다음 분 들어오세요.", 1.0),
     ("patient", "이틀 전부터 목이 아프고 기침이 나요.", 0.8),
     ("doctor", "목을 한번 볼게요.", 0.0),
+]
+
+# 쉼 없이 끼어드는 대화: 환자 말 도중에 의사가 바로 묻고(쉼 0초·살짝 겹침, 짧은 "설사요?" 포함),
+# 의사 설명 도중에 환자가 끼어든다. 말한 사람이 바뀌는 곳마다 줄이 나뉘고 각 줄에 맞는 사람이 붙어야 한다.
+INTERRUPTION = [
+    ("doctor", "어디가 불편해서 오셨어요?", 0.6),
+    ("patient", "사흘 전부터 밥만 먹으면 속이 쓰리고 가끔 등까지 아파서요", 0.0),
+    ("doctor", "등 어느 쪽이요?", 0.0),
+    ("patient", "오른쪽 아래쪽이요. 그리고 화장실을 세 번이나 갔는데", 0.0),
+    ("doctor", "설사요?", 0.0),
+    ("patient", "네 물처럼 나오고 색깔은 좀 노랬어요", -0.25),
+    ("doctor", "열은 안 났어요?", 0.0),
+    ("patient", "열은 없었어요.", 0.7),
+    ("doctor", "피검사를 해 보면 염증 수치를 알 수 있고요", -0.15),
+    ("patient", "오늘 바로 되나요?", 0.0),
+    ("doctor", "네, 결과는 내일 나와요.", 0.0),
 ]
 
 # 의사 목소리 등록용 낭독 (등록 창의 읽기 문장과 같은 내용). 위 대화들의 의사 역할과 같은 목소리다.
@@ -133,20 +149,19 @@ def room_noise(n: int, rng: np.random.Generator, dbfs: float = -62.0) -> np.ndar
 
 
 def compose(script, tmp: Path, rng: np.random.Generator, lead_s: float = 0.8, tail_s: float = 0.8):
-    parts: list[np.ndarray] = [np.zeros(int(lead_s * WORK_SR), np.float32)]
+    """대사를 차례로 놓는다. 쉼이 음수인 곳은 두 사람 소리를 겹쳐 섞는다."""
+    placed: list[tuple[int, np.ndarray]] = []
     marks = []
-    cursor = len(parts[0])
+    cursor = int(lead_s * WORK_SR)
     for role, text, gap in script:
         voice, pitch = VOICES[role]
         utt = synth(text, voice, pitch, tmp)
         marks.append({"role": role, "text": text, "start": cursor / WORK_SR, "end": (cursor + len(utt)) / WORK_SR})
-        parts.append(utt)
-        cursor += len(utt)
-        silence = np.zeros(int(gap * WORK_SR), np.float32)
-        parts.append(silence)
-        cursor += len(silence)
-    parts.append(np.zeros(int(tail_s * WORK_SR), np.float32))
-    audio = np.concatenate(parts)
+        placed.append((cursor, utt))
+        cursor += len(utt) + int(gap * WORK_SR)
+    audio = np.zeros(max([cursor] + [at + len(utt) for at, utt in placed]) + int(tail_s * WORK_SR), np.float32)
+    for at, utt in placed:
+        audio[at : at + len(utt)] += utt
     audio += room_noise(len(audio), rng)
     return audio, marks
 
@@ -178,6 +193,7 @@ def main() -> int:
             ("voice_enroll_other.wav", ENROLL_OTHER, 44100, 1),
             ("doctor_drugs.wav", DOCTOR_DRUGS, 48000, 1),
             ("training_session.wav", TRAINING_SESSION, 48000, 1),
+            ("interruption.wav", INTERRUPTION, 48000, 1),
         ]
         for name, script, sr, ch in specs:
             audio, marks = compose(script, tmp, rng, tail_s=1.5 if name == "training_session.wav" else 0.8)

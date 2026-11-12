@@ -47,7 +47,7 @@ from clinic_scribe.speakers import (
     enrollment_embeddings,
     speech_only,
 )
-from clinic_scribe.training import GENERAL, SPECIALTIES, build_prompts
+from clinic_scribe.training import RENAMED_SPECIALTIES, SPECIALTIES, build_prompts
 from clinic_scribe.ui import theme
 from clinic_scribe.ui.diction_dialog import DictionEditor
 from clinic_scribe.ui.training_panel import TrainingPanel
@@ -154,14 +154,14 @@ class VoiceDialog(QDialog):
         name_row.addWidget(specialty_label)
         self.specialty_combo = QComboBox()
         self.specialty_combo.addItems(SPECIALTIES)
-        self.specialty_combo.setToolTip("고른 과 외래에서 자주 쓰는 약·검사 이름이 든 문장을 따라 읽습니다. 의사마다 기억합니다.")
+        self.specialty_combo.setToolTip("고른 과 의사가 진료실에서 자주 하는 말을 따라 읽습니다. 의사마다 기억합니다.")
         name_row.addWidget(self.specialty_combo)
         layout.addLayout(name_row)
         self.consent = QCheckBox("본인에게 목소리 등록 동의를 받았습니다 (목소리 특징값은 생체정보로, 이 컴퓨터 에만 저장됩니다)")
         layout.addWidget(self.consent)
         guide = QLabel(
-            "의사가 컴퓨터 앞에서 화면에 나오는 짧은 문장 12개를 하나씩 따라 읽습니다(약 1분). 문장은 고른 진료과에서 자주 쓰는 "
-            "말과 약·검사 이름으로 나옵니다. 같은 녹음으로 목소리를 등록하고, "
+            "의사가 컴퓨터 앞에서 화면에 나오는 짧은 문장 12개를 하나씩 따라 읽습니다(약 1분). 문장은 고른 진료과 의사가 "
+            "진료실에서 실제로 하는 말로 나옵니다. 같은 녹음으로 목소리를 등록하고, "
             "받아 적은 글을 읽은 문장과 비교해 이 의사의 말이 어떻게 잘못 들리는지 찾아 딕션 사전을 만듭니다. "
             "실제 진료실에서 진료 때 쓰는 마이크로 하는 것이 가장 정확합니다."
         )
@@ -234,7 +234,7 @@ class VoiceDialog(QDialog):
         """이미 등록한 의사 이름이면 그 의사의 진료과를 고른다 (다시 학습할 때)."""
         known = self.book.specialty(text.strip())
         if known:
-            self.specialty_combo.setCurrentText(known)
+            self.specialty_combo.setCurrentText(RENAMED_SPECIALTIES.get(known, known))
 
     # ---- 따라 읽기 학습 ------------------------------------------------------
     def _on_train(self) -> None:

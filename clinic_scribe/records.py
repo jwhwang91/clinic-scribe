@@ -137,7 +137,9 @@ def _build(cls, data: Any):
 
 def result_to_dict(result: TranscriptionResult) -> dict:
     data = asdict(result)
-    data.pop("phrases", None)  # 줄로 잇기 전 말 덩어리는 전사할 때만 쓴다
+    data.pop("phrases", None)  # 줄로 잇기 전 말 덩어리와 낱말은 전사할 때만 쓴다
+    for seg in data.get("segments", []):
+        seg.pop("words", None)
     return data
 
 

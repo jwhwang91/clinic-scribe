@@ -277,7 +277,7 @@ class TrainingPanel(QWidget):
                 finding = item.data(Qt.ItemDataRole.UserRole)
                 if finding is not None and item.checkState() == Qt.CheckState.Checked:
                     try:
-                        self.diction.add_correction(self._name, finding.heard, finding.expected)
+                        self.diction.add_correction(self._name, finding.heard, finding.expected, term=finding.hint)
                     except DictionError:
                         continue  # 한 글자짜리 등은 교정으로 쓸 수 없다
             self.diction.save()

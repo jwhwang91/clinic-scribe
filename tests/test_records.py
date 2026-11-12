@@ -19,6 +19,7 @@ from clinic_scribe.records import (
     apply_data,
     record_row,
     remap_result,
+    result_to_dict,
     remap_time,
     session_data,
     session_from_row,
@@ -114,6 +115,13 @@ def test_store_round_trip_list_details_and_audio(tmp_path):
     store.save(record_row(session, "요약 준비됨"), session_data(session))
     assert store.load_index()[0].audio == "7.flac" and store.load_data(7)["summary_stale"] is True
     assert np.array_equal(store.read_audio(7), pcm)
+
+
+def test_words_and_phrases_are_not_stored():
+    result = make_result()
+    result.segments[0].words = [TranscriptSegment(1.0, 1.4, "어디가")]
+    data = result_to_dict(result)
+    assert "phrases" not in data and all("words" not in seg for seg in data["segments"])
 
 
 def test_general_summary_round_trip(tmp_path):

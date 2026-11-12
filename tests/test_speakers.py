@@ -8,6 +8,7 @@ import pytest
 
 from clinic_scribe.speakers import (
     MIN_ENROLL_S,
+    MIN_SEGMENT_S,
     PATIENT,
     SAMPLE_RATE,
     SpeakerError,
@@ -15,10 +16,12 @@ from clinic_scribe.speakers import (
     clean_name,
     enrollment_embeddings,
     label_segments,
+    label_turns,
     main_doctor,
     speech_only,
+    split_turns,
 )
-from clinic_scribe.whisper import TranscriptSegment
+from clinic_scribe.whisper import TranscriptSegment, merge_phrases, phrase_from_words
 
 
 class FakeEncoder:
@@ -34,6 +37,38 @@ def axis(k):
     vector = np.zeros(8, np.float32)
     vector[k] = 1.0
     return vector
+
+
+class MixEncoder:
+    """구간에 섞인 목소리 비율대로 특징값을 만든다: 값 k 인 표본의 비율 → k 번째 축 (0 은 무음)."""
+
+    def embed(self, samples):
+        counts = np.bincount(np.abs(samples.astype(np.int64)) % 8, minlength=8).astype(np.float32)
+        counts[0] = 0.0
+        return counts if counts.any() else axis(0)
+
+
+class PureEncoder:
+    """한 사람 소리가 80% 이상인 구간만 그 사람으로 들리고, 섞인 구간은 등록되지 않은 목소리(3)로 들린다."""
+
+    def embed(self, samples):
+        values = np.abs(samples.astype(np.int64))
+        values = values[values > 0]
+        counts = np.bincount(values % 8, minlength=8)
+        k = int(np.argmax(counts))
+        return axis(k if counts[k] >= 0.8 * len(values) else 3)
+
+
+def conversation(parts, total_s=8.0):
+    """[(목소리 값, [(낱말, 길이초), ...]), ...] → 소리(목소리 값으로 채움)와 낱말이 든 말 덩어리 하나."""
+    pcm = np.zeros(int(total_s * SAMPLE_RATE), np.int16)
+    words, t = [], 0.5
+    for value, said in parts:
+        for text, length in said:
+            pcm[int(t * SAMPLE_RATE) : int((t + length) * SAMPLE_RATE)] = value
+            words.append(TranscriptSegment(t, t + length, text, confidence=0.9))
+            t += length
+    return pcm, phrase_from_words(words, 0.5, t)
 
 
 def test_voice_book_enroll_identify_remove_and_file(tmp_path):
@@ -100,6 +135,57 @@ def test_speech_only_drops_silence():
     assert len(speech_only(np.zeros(5 * SAMPLE_RATE, np.int16))) == 0  # 디지털 무음
 
 
+def test_split_turns_cuts_where_doctor_cuts_in_without_pause(tmp_path):
+    """쉼 없이 끼어든 의사 질문: 말 덩어리 하나를 말한 사람이 바뀌는 낱말 경계에서 셋으로 나눈다."""
+    book = VoiceBook(tmp_path / "v.json")
+    book.enroll("김원장", [axis(1)], seconds=20)
+    patient = [("사흘", 0.5), ("전부터", 0.5), ("밥만", 0.5), ("먹으면", 0.5), ("속이", 0.5), ("쓰려요.", 0.5)]
+    pcm, phrase = conversation([(2, patient), (1, [("등", 0.5), ("어느", 0.5), ("쪽이요?", 0.5)]),
+                                (2, [("오른쪽", 0.5), ("아래쪽", 0.5), ("이요.", 0.5)])])
+    parts = split_turns(phrase, pcm, MixEncoder(), book, 0.75)
+    assert [(p.start, p.end, p.speaker, p.text) for p in parts] == [
+        (0.5, 3.5, PATIENT, "사흘 전부터 밥만 먹으면 속이 쓰려요."),
+        (3.5, 5.0, "김원장", "등 어느 쪽이요?"),
+        (5.0, 6.5, PATIENT, "오른쪽 아래쪽 이요."),
+    ]
+    assert [len(p.words) for p in parts] == [6, 3, 3] and parts[1].confidence == pytest.approx(0.9)
+
+    # label_turns: 덩어리마다 말한 사람을 붙이고 섞인 덩어리는 나눈다 → 줄로 이으면 사람마다 한 줄
+    lines = merge_phrases(label_turns([phrase], pcm, MixEncoder(), book, 0.75))
+    assert [(line.speaker, line.text) for line in lines] == [(p.speaker, p.text) for p in parts]
+    assert all(line.words == [] for line in lines)
+    cancel = threading.Event()
+    cancel.set()
+    assert label_turns([phrase], pcm, MixEncoder(), book, 0.75, cancel) == [phrase]
+
+
+def test_split_turns_keeps_one_speaker_and_too_short_interjections(tmp_path):
+    book = VoiceBook(tmp_path / "v.json")
+    book.enroll("김원장", [axis(1)], seconds=20)
+    pcm, alone = conversation([(2, [("사흘", 0.8), ("전부터", 0.8), ("속이", 0.8), ("쓰려요.", 0.8)])])
+    assert split_turns(alone, pcm, MixEncoder(), book, 0.75) == [alone]
+    # 0.4초 "네?" 는 목소리로 가리기 어려워 나누지 않는다
+    pcm, short = conversation([(2, [("화장실을", 1.0), ("세", 0.5), ("번", 1.0)]), (1, [("네?", 0.4)]),
+                               (2, [("갔어요.", 1.0), ("물처럼", 1.0)])])
+    assert split_turns(short, pcm, MixEncoder(), book, 0.75) == [short]
+    assert split_turns(short, pcm, MixEncoder(), VoiceBook(tmp_path / "none.json"), 0.75) == [short]  # 등록 목소리 없음
+    no_words = TranscriptSegment(short.start, short.end, short.text)
+    assert split_turns(no_words, pcm, MixEncoder(), book, 0.75) == [no_words]
+
+
+def test_split_turns_finds_short_question_that_windows_miss(tmp_path):
+    """0.7초짜리 "설사요?": 1초 창마다 환자 말이 섞여 놓치지만, '?' 로 끝나는 짧은 구간을 따로 비교해 찾는다."""
+    book = VoiceBook(tmp_path / "v.json")
+    book.enroll("김원장", [axis(1)], seconds=20)
+    pcm, phrase = conversation([(2, [("화장실을", 1.0), ("세", 0.5), ("번이나", 1.0), ("갔는데", 1.0)]),
+                                (1, [("설사요?", 0.7)]), (2, [("네", 0.4), ("물처럼", 0.8), ("나왔어요.", 1.0)])])
+    parts = split_turns(phrase, pcm, PureEncoder(), book, 0.75)
+    assert [(p.speaker, p.text) for p in parts] == [
+        (PATIENT, "화장실을 세 번이나 갔는데"), ("김원장", "설사요?"), (PATIENT, "네 물처럼 나왔어요."),
+    ]
+    assert (parts[1].start, parts[1].end) == pytest.approx((4.0, 4.7))
+
+
 @pytest.mark.models
 def test_real_model_tells_mock_doctor_from_patient(samples, manifest, speaker_encoder, tmp_path):
     """가상 진료 음성: 실제 화자 인식 모델이 등록한 의사 역할 목소리와 환자 역할 목소리를 구분한다."""
@@ -157,11 +243,54 @@ def test_lines_split_where_speaker_changes_even_without_punctuation(samples, man
 
     # 이 힌트로 Metal(macOS) 빌드는 문장부호를 빼 의사·환자 말이 한 줄로 섞인다. CPU 빌드(Windows·Linux)는 처음부터 나뉘기도 한다.
     # 어느 쪽이든 아래처럼 말한 사람을 붙여 다시 이은 줄은 한 사람 말이어야 한다.
-    lines = merge_phrases(label_segments(result.phrases, audio, speaker_encoder, book, settings.speaker_threshold))
+    lines = merge_phrases(label_turns(result.phrases, audio, speaker_encoder, book, settings.speaker_threshold))
     assert all(len(roles(line)) == 1 for line in lines), [(line.speaker, line.text) for line in lines]
     for line in lines:
         expected = "김원장" if roles(line) == {"doctor"} else PATIENT
-        assert line.speaker == expected, line.text
+        # CPU 빌드는 "다른 약은요?"(0.97초)를 따로 나눠 받아 적는다: 1초보다 짧은 말은 판단하지 않는다
+        assert line.speaker == expected or (line.speaker is None and line.end - line.start < MIN_SEGMENT_S), line.text
+
+
+@pytest.mark.models
+def test_doctor_cutting_in_without_pause_gets_own_line(samples, manifest, whisper_runner, speaker_encoder, settings,
+                                                        tmp_path):
+    """쉼 없이 끼어든 말(겹쳐 시작한 말, 0.8초짜리 "설사요?" 포함)도 말한 사람이 바뀌는 곳에서 줄이 나뉘고 맞는 사람이 붙는다."""
+    from clinic_scribe.audio import load_audio_file, to_whisper_pcm
+
+    def pcm(name):
+        data, rate = load_audio_file(samples / name)
+        return to_whisper_pcm(data, rate)
+
+    book = VoiceBook(tmp_path / "voices.json")
+    speech = speech_only(pcm("voice_enroll_doctor.wav"))
+    book.enroll("김원장", enrollment_embeddings(speaker_encoder, speech), len(speech) / SAMPLE_RATE)
+    audio = pcm("interruption.wav")
+    result = whisper_runner.transcribe(audio, use_vad=True, params=settings.vad)
+    lines = merge_phrases(label_turns(result.phrases, audio, speaker_encoder, book, settings.speaker_threshold))
+    utterances = manifest["interruption.wav"]["utterances"]
+
+    def overlap(line, u):
+        return max(0.0, min(line.end, u["end"]) - max(line.start, u["start"]))
+
+    shown = [(line.speaker, line.text) for line in lines]
+    for line in lines:
+        by_role: dict[str, float] = {}
+        for u in utterances:
+            by_role[u["role"]] = by_role.get(u["role"], 0.0) + overlap(line, u)
+        role = max(by_role, key=by_role.__getitem__)
+        assert sum(v for r, v in by_role.items() if r != role) <= 0.35, shown  # 겹쳐 말한 0.25초 정도만 섞일 수 있다
+        expected = "김원장" if role == "doctor" else PATIENT
+        assert line.speaker == expected or (line.speaker is None and line.end - line.start < MIN_SEGMENT_S), shown
+    for u in utterances:  # 의사 말은 짧은 질문까지 모두 의사 줄로 나온다
+        if u["role"] == "doctor":
+            mine = sum(overlap(line, u) for line in lines if line.speaker == "김원장")
+            assert mine >= 0.7 * (u["end"] - u["start"]), (u["text"], shown)
+    # 낱말 하나도 앞사람 줄로 새지 않는다: 각 발화의 줄은 그 발화가 시작한 곳에서 시작한다
+    # ("아파서요. 등 / 어느 쪽이요?"처럼 끼어든 질문의 첫 낱말 "등"(0.2초)이 앞 줄에 붙으면 0.18초 늦게 시작한다)
+    for u in utterances:
+        name = "김원장" if u["role"] == "doctor" else PATIENT
+        line = max((line for line in lines if line.speaker == name), key=lambda line: overlap(line, u))
+        assert line.start <= u["start"] + 0.15, (u["text"], shown)
 
 
 def test_rename_keeps_voiceprint_and_refuses_taken_names(tmp_path):

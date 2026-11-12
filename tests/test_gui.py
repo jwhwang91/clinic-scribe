@@ -579,9 +579,16 @@ def test_guided_reading_registers_voice_and_learns_diction(window, qapp, samples
     from clinic_scribe.ui.voice_dialog import VoiceDialog
 
     runner, params = window._whisper_runner(), window._vad_params()
+
+    def transcribe(pcm, prompt=None):
+        result = runner.transcribe(pcm, use_vad=True, params=params, prompt=prompt)
+        if prompt is None:  # 학습 전: Whisper 빌드마다 틀리는 말이 달라, '당화혈색소'를 잘못 들은 것으로 바꿔 학습 과정을 확인한다
+            for seg in result.segments:
+                seg.text = seg.text.replace("당화혈색소", "당하 혈색소")
+        return result
+
     dialog = VoiceDialog(window.voices, lambda: speaker_encoder, FAKE_DEVICE, window, diction=window.diction,
-                         transcribe=lambda pcm, prompt=None: runner.transcribe(pcm, use_vad=True, params=params, prompt=prompt),
-                         base_prompt=window.settings.whisper_prompt)
+                         transcribe=transcribe, base_prompt=window.settings.whisper_prompt)
     dialog.interactive = False
     panel = dialog.training
     dialog.name_edit.setText("김원장")
@@ -601,8 +608,8 @@ def test_guided_reading_registers_voice_and_learns_diction(window, qapp, samples
     assert dialog.voice_stack.currentIndex() == 0 and "저장했습니다" in dialog.message.text()
     assert window.voices.names() == ["김원장"]
     learned = window.diction.entry("김원장")
-    assert any(c.right.startswith("트리메부틴") for c in learned.corrections)
-    assert any(term.startswith("트리메부틴") for term in learned.vocabulary)  # 다음부터 힌트로도 쓴다
+    assert any((c.wrong, c.right) == ("당하 혈색소", "당화혈색소") for c in learned.corrections)
+    assert "당화혈색소" in learned.vocabulary  # 다음부터 힌트로도 쓴다
     dialog.reject()
 
 
@@ -636,7 +643,8 @@ def test_cue_splits_only_when_registered_doctor_says_it(window, qapp, samples, s
     FakeInputStream.source = source_audio(samples / "two_patients.wav")
     window.record_btn.click()
     assert wait_until(qapp, lambda: window.recorder.elapsed > 19.5, 40)
-    assert checked and not any(checked) and len(window.sessions) == 1
+    assert wait_until(qapp, lambda: checked, 60)  # GPU 없는 컴퓨터는 실시간 전사가 녹음보다 늦게 신호 단어에 닿는다
+    assert not any(checked) and len(window.sessions) == 1
     window._on_cancel_recording()
 
     # 대화 속 의사 목소리를 등록: 나눈다

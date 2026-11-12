@@ -143,12 +143,13 @@ class DictionBook:
         else:
             self.entries[new] = moved
 
-    def add_correction(self, scope: str, wrong: str, right: str, add_term: bool = True) -> Correction:
-        """교정 하나를 더한다 (전사문에서 고쳐 쓰기). 바른 말은 용어 목록에도 넣어 다음부터 처음부터 바르게 받아 적게 한다."""
+    def add_correction(self, scope: str, wrong: str, right: str, add_term: bool = True, term: str = "") -> Correction:
+        """교정 하나를 더한다 (전사문에서 고쳐 쓰기). 바른 말(term 을 주면 그 말)은 용어 목록에도 넣어
+        다음부터 처음부터 바르게 받아 적게 한다."""
         wrong, right = check_correction(wrong, right)
         entry = self.entry(scope)
         rules = [c for c in entry.corrections if _key(c.wrong) != _key(wrong)] + [Correction(wrong, right)]
-        self.set_entry(scope, entry.vocabulary + ([right] if add_term else []), rules)
+        self.set_entry(scope, entry.vocabulary + ([term or right] if add_term else []), rules)
         return Correction(wrong, right)
 
 

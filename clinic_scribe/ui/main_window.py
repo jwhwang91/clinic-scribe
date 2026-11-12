@@ -75,7 +75,7 @@ from clinic_scribe.records import (
 )
 from clinic_scribe.recorder import InputDevice, Recorder, RecorderError, demo_device, list_input_devices
 from clinic_scribe.session import Session, TranscriptRun
-from clinic_scribe.speakers import PATIENT, SpeakerEncoder, SpeakerError, VoiceBook, label_segments, main_doctor
+from clinic_scribe.speakers import PATIENT, SpeakerEncoder, SpeakerError, VoiceBook, label_segments, label_turns, main_doctor
 from clinic_scribe.summarizer import ClaudeConfig, LocalConfig, SummaryError, summarize, summarize_local
 from clinic_scribe.ui import theme
 from clinic_scribe.ui.diction_dialog import CorrectionDialog
@@ -1692,8 +1692,8 @@ class MainWindow(QMainWindow):
             prompt = None if diction.empty else build_prompt(base_prompt, diction, doctor)
             result = runner.transcribe(session.pcm16, use_vad=use_vad, params=params, cancel=cancel, prompt=prompt)
             if encoder is not None and result.segments:
-                if result.phrases:  # 말 덩어리마다 말한 사람을 정하고, 사람이 바뀌는 곳에서 줄을 나눠 다시 잇는다
-                    labeled = label_segments(result.phrases, session.pcm16, encoder, voices, threshold, cancel)
+                if result.phrases:  # 말 덩어리마다 말한 사람을 정하고(쉼 없이 끼어든 말은 덩어리를 나눠), 사람이 바뀌는 곳에서 줄을 나눠 다시 잇는다
+                    labeled = label_turns(result.phrases, session.pcm16, encoder, voices, threshold, cancel)
                     result.segments = merge_phrases(labeled)
                     assign_regions(result.segments, result.regions, result.vad_enabled)
                 else:

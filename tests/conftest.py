@@ -1,3 +1,4 @@
+import faulthandler
 import json
 import os
 import shutil
@@ -15,7 +16,7 @@ SAMPLES = REPO / "samples"
 REQUIRED_SAMPLES = (
     "manifest.json", "mock_consult_short.wav", "mock_consult.wav", "long_pause.wav", "injection.wav", "daily_chat.wav",
     "two_patients.wav", "voice_enroll_doctor.wav", "voice_enroll_other.wav", "doctor_drugs.wav", "training_session.wav",
-    "silence.wav", "quiet_room.wav",
+    "interruption.wav", "silence.wav", "quiet_room.wav",
 )
 
 
@@ -87,3 +88,10 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "claude" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    """CI: 테스트가 다 끝났는데 Python 이 닫히지 않으면(Linux 에서 1시간 멈춘 일) 60초 뒤 모든 스레드가 멈춘 곳을 남기고 끝낸다."""
+    if os.environ.get("CI"):
+        faulthandler.dump_traceback_later(60, exit=True)
