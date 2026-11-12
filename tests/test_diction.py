@@ -14,6 +14,7 @@ from clinic_scribe.diction import (
     guess_doctor,
 )
 from clinic_scribe.speakers import PATIENT, SAMPLE_RATE, VoiceBook
+from clinic_scribe.whisper import cli_prompt
 from clinic_scribe.whisper import TranscriptSegment
 
 
@@ -159,7 +160,10 @@ def test_doctor_terms_and_corrections_fix_drug_names(samples, whisper_runner, sp
     assert doctor == "김원장"
     final = transcribe(build_prompt(settings.whisper_prompt, book, doctor))
     text = " ".join(s.text for s in final)
-    for word in ("트리메부틴은", "현탁액", "세티리진"):
+    expected = ("트리메부틴은", "현탁액", "세티리진")
+    if not cli_prompt("세티리진."):  # Windows(UTF-8 모드 아님)는 한글 힌트를 넘기지 못한다: 사전 교정만 확인
+        expected = expected[:2]
+    for word in expected:
         assert word in text, text
     assert len(final) >= 3  # 힌트 때문에 의사·환자 말이 한 줄로 합쳐지지 않는다
     patient = [s for s in final if s.speaker == PATIENT]

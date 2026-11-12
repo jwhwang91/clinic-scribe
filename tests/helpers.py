@@ -86,8 +86,10 @@ def make_executable(path: Path, code: str) -> Path:
         stub = "t64-arm.exe" if platform.machine().lower() in ("arm64", "aarch64") else "t64.exe"
         launcher = (Path(pip.__file__).parent / "_vendor" / "distlib" / stub).read_bytes()
         archive = io.BytesIO()
+        # 파이프로 이어지면 Windows python 의 표준 입출력은 시스템 코드 페이지다: claude·llama-server 처럼 UTF-8 로 주고받는다
+        utf8 = "import sys\nsys.stdin.reconfigure(encoding='utf-8')\nsys.stdout.reconfigure(encoding='utf-8')\n"
         with zipfile.ZipFile(archive, "w") as z:
-            z.writestr("__main__.py", code)
+            z.writestr("__main__.py", utf8 + code)
         exe = path.with_suffix(".exe")
         exe.write_bytes(launcher + f'#!"{sys.executable}"\n'.encode() + archive.getvalue())
         return exe

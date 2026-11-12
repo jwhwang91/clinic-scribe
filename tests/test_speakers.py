@@ -155,7 +155,8 @@ def test_lines_split_where_speaker_changes_even_without_punctuation(samples, man
     def roles(seg):
         return {u["role"] for u in utterances if min(seg.end, u["end"]) - max(seg.start, u["start"]) > 0.15}
 
-    assert any(len(roles(seg)) > 1 for seg in result.segments)  # 말한 사람을 모르면 섞인다
+    # 이 힌트로 Metal(macOS) 빌드는 문장부호를 빼 의사·환자 말이 한 줄로 섞인다. CPU 빌드(Windows·Linux)는 처음부터 나뉘기도 한다.
+    # 어느 쪽이든 아래처럼 말한 사람을 붙여 다시 이은 줄은 한 사람 말이어야 한다.
     lines = merge_phrases(label_segments(result.phrases, audio, speaker_encoder, book, settings.speaker_threshold))
     assert all(len(roles(line)) == 1 for line in lines), [(line.speaker, line.text) for line in lines]
     for line in lines:

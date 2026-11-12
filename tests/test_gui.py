@@ -1,6 +1,7 @@
 """오프스크린 Qt 화면 테스트. 마이크는 가짜 입력 스트림으로 대신한다(권한 대화상자 없음)."""
 
 import json
+import os
 import sys
 import threading
 import time
@@ -24,8 +25,15 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
+# 느린 컴퓨터(GPU 없는 CI 등)에서는 가짜 마이크를 실제 속도로 흘리고 기다리는 시간을 늘린다:
+#   CLINIC_SCRIBE_TEST_SPEED   가짜 마이크 배속 (기본 4)
+#   CLINIC_SCRIBE_TEST_PATIENCE 기다리는 시간 배수 (기본 1)
+SPEED = float(os.environ.get("CLINIC_SCRIBE_TEST_SPEED", "4"))
+PATIENCE = float(os.environ.get("CLINIC_SCRIBE_TEST_PATIENCE", "1"))
+
+
 def wait_until(qapp, condition, timeout=120.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout * PATIENCE
     while time.monotonic() < deadline:
         qapp.processEvents()
         if condition():
@@ -38,7 +46,7 @@ FAKE_DEVICE = recorder.InputDevice(index=7, name="가짜 내장 마이크", chan
 
 
 class FakeInputStream:
-    """sounddevice.InputStream 대역: 지정한 소리를 4배속으로 콜백에 흘려 준다."""
+    """sounddevice.InputStream 대역: 지정한 소리를 SPEED 배속(기본 4)으로 콜백에 흘려 준다."""
 
     source = np.zeros(48000, np.float32)
 
@@ -59,10 +67,10 @@ class FakeInputStream:
             chunk = self.source[pos : pos + block]
             self.callback(np.repeat(chunk[:, None], self.channels, axis=1), len(chunk), None, None)
             pos += block
-            time.sleep(block / self.samplerate / 4)
+            time.sleep(block / self.samplerate / SPEED)
         while self.active:  # 소스가 끝나면 조용한 입력을 계속 보낸다
             self.callback(np.full((block, self.channels), 1e-4, np.float32), block, None, None)
-            time.sleep(block / self.samplerate / 4)
+            time.sleep(block / self.samplerate / SPEED)
 
     def stop(self):
         self.active = False
@@ -231,7 +239,7 @@ def test_digital_silence_warns_about_permission(window, qapp, monkeypatch):
         def _run(self):
             while self.active:
                 self.callback(np.zeros((1024, self.channels), np.float32), 1024, None, None)
-                time.sleep(1024 / self.samplerate / 4)
+                time.sleep(1024 / self.samplerate / SPEED)
 
     monkeypatch.setattr(recorder.sd, "InputStream", ZeroStream)
     window.record_btn.click()

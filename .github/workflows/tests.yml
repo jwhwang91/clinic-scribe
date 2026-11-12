@@ -35,7 +35,7 @@ jobs:
         os: [ubuntu-24.04, windows-2022, macos-latest]
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -66,6 +66,9 @@ jobs:
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
+          # GitHub 컴퓨터는 GPU 없이 CPU 4개라 전사가 느리다: 가짜 마이크를 실제 속도로, 기다리는 시간은 5배로
+          CLINIC_SCRIBE_TEST_SPEED: "1"
+          CLINIC_SCRIBE_TEST_PATIENCE: "5"
         run: |
           if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
           # 테스트 하나가 5분을 넘으면 모든 스레드가 어디서 멈췄는지 로그에 남긴다
