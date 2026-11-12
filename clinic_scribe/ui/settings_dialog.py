@@ -1,8 +1,9 @@
-"""설정 창: 실행 파일·모델 경로, Whisper 옵션, 요약(Claude Code CLI 또는 로컬 모델) 옵션, 진료 나누기, 말한 사람 표시."""
+"""설정 창: 실행 파일·모델 경로, Whisper 옵션, 요약(Claude Code CLI 또는 로컬 모델) 옵션, 진료 나누기, 말한 사람 표시,
+씨차트 연결 점검(Windows)."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -29,7 +30,9 @@ from clinic_scribe.config import (
     default_model_dir,
     settings_path,
 )
-from clinic_scribe import installer
+from clinic_scribe import emr_probe, installer
+from clinic_scribe.ui import theme
+from clinic_scribe.ui.emr_probe_dialog import EmrProbeDialog
 from clinic_scribe.ui.widgets import PathField
 
 
@@ -154,9 +157,12 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
+        pages = [(whisper_box, "전사"), (claude_box, "요약"), (split_box, "진료 나누기"), (speaker_box, "말한 사람")]
+        if emr_probe.supported():  # 씨차트는 Windows 프로그램
+            pages.append((self._emr_box(), "씨차트"))
         # 항목이 많아 작은 화면에서도 잘리지 않게 탭으로 나눈다.
         tabs = QTabWidget()
-        for box, title in ((whisper_box, "전사"), (claude_box, "요약"), (split_box, "진료 나누기"), (speaker_box, "말한 사람")):
+        for box, title in pages:
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.addWidget(box)
@@ -166,6 +172,29 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs, 1)
         layout.addWidget(info)
         layout.addWidget(buttons)
+
+    def _emr_box(self) -> QGroupBox:
+        box = QGroupBox("씨차트 연결 (준비 중)")
+        layout = QVBoxLayout(box)
+        layout.setSpacing(10)
+        note = QLabel(
+            "씨차트에서 고른 환자의 이름으로 진료 기록을 환자별로 나눠 저장하는 기능을 준비하고 있습니다. "
+            "먼저 이 컴퓨터에서 씨차트 화면의 환자 이름을 읽을 수 있는지 점검합니다. 씨차트에는 아무것도 입력하거나 "
+            "누르지 않고 읽기만 하며, 환자 이름은 이 컴퓨터 밖으로 보내지 않습니다."
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.emr_probe_btn = QPushButton("씨차트 연결 점검…")
+        self.emr_probe_btn.setObjectName("primary")
+        self.emr_probe_btn.clicked.connect(self._open_emr_probe)
+        layout.addWidget(self.emr_probe_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        return box
+
+    def _open_emr_probe(self) -> None:
+        dialog = EmrProbeDialog(self)
+        dialog.setStyleSheet(theme.stylesheet("EmrProbeDialog", EmrProbeDialog.STYLE))
+        dialog.exec()
 
     def apply(self) -> None:
         s = self.settings

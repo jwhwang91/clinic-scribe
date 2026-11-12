@@ -1,0 +1,27 @@
+# 씨차트 연결 점검(Windows 화면 읽기)을 실제 Windows 에서 확인한다: 가짜 진료 차트 창을 다른 프로세스로 띄우고
+# 그 창에서 가상 환자 이름을 찾는지, 다른 환자를 열면 같은 자리에서 찾는지 본다. 전체 테스트(tests.yml)보다 훨씬 빨리 끝난다.
+name: emr-probe
+
+on:
+  push:
+    paths:
+      - "clinic_scribe/emr_probe.py"
+      - "clinic_scribe/procutil.py"
+      - "tests/test_emr_probe.py"
+      - "tests/fake_emr_window.py"
+      - ".github/workflows/emr-probe.yml"
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: 씨차트 연결 점검 (Windows 화면 읽기)
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest "comtypes>=1.4"
+      # 화면 창 테스트(PySide6)는 건너뛰고, 화면 읽기·가리기·결과 파일만 본다
+      - run: python -m pytest -v -rs tests/test_emr_probe.py
