@@ -1,12 +1,14 @@
 # clinic-scribe
 
-모의 진료 대화를 맥북 마이크로 녹음하고, **스페이스바**로 녹음을 끝내면 **whisper.cpp 로 이 Mac 에서 전사**한 뒤
-**Claude Code CLI 로 주요 내용 요약(또는 진료 차트 초안)** 을 만드는 데스크톱 앱입니다.
+모의 진료 대화를 마이크(내장·외장 어느 것이든)로 녹음하고, **스페이스바**로 녹음을 끝내면 **whisper.cpp 로 이 컴퓨터에서 전사**한 뒤
+**주요 내용 요약(또는 진료 차트 초안)** 을 만드는 데스크톱 앱입니다. 요약은 **Claude Code** 또는 **이 컴퓨터의 로컬 모델** 중 고릅니다.
+**macOS · Windows · Linux** 에서 같은 기능으로 돌고, 새 컴퓨터에서 처음 열면 필요한 프로그램·모델을 받는 '설치' 창이 뜹니다.
 스페이스바를 깜빡해도 긴 침묵이나 "들어오세요" 같은 다음 환자 신호에서 진료를 자동으로 나눕니다.
+진료마다 무음을 줄인 녹음 · 전사문 · 요약이 이 컴퓨터의 **진료 기록**에 저장되어 앱을 다시 열어도 남고, 필요 없으면 지울 수 있습니다.
 
 ```
-맥북 마이크 녹음 ──▶ whisper.cpp 로컬 전사 (+ Silero VAD 음성 구간) ──▶ Claude Code CLI 요약 ──▶ 앱 화면
-   (sounddevice)        (whisper-cli, Metal 가속, 외부 전송 없음)          (claude -p, 전사문만 전송)
+마이크 녹음 ──▶ whisper.cpp 로컬 전사 (+ Silero VAD 음성 구간) ──▶ 요약 ─┬─ Claude Code CLI (claude -p, 전사문만 전송)
+ (sounddevice)     (whisper-cli, 외부 전송 없음)                         └─ 로컬 모델 (llama.cpp + Qwen3, 전송 없음)
 ```
 
 첫 버전은 **가상 환자·모의 진료 테스트용**입니다. EMR(see차트 등) 연동, 환자 등록, 계정, 서버 배포는 범위 밖입니다.
@@ -16,45 +18,83 @@
 
 | 단계 | 처리 위치 | 비고 |
 | --- | --- | --- |
-| 녹음 | 이 Mac (메모리) | 장치 샘플레이트로 녹음 → 전사 직전 16 kHz mono PCM WAV 로 변환 |
+| 녹음 | 이 Mac | 장치 샘플레이트로 녹음 → 전사 직전 16 kHz mono 로 변환해 진료 기록에 저장 (전사가 끝나면 긴 무음을 줄인 것으로 바꿈) |
 | 실시간 전사 미리보기·신호 단어 감지 | 이 Mac (whisper.cpp) | 외부 전송 없음 |
 | 전사·음성 구간 | 이 Mac (whisper.cpp) | 외부 전송 없음. 임시 WAV 는 처리 직후 삭제 |
-| 말한 사람 표시 | 이 Mac (sherpa-onnx 화자 인식) | 외부 전송 없음. 등록한 의사 목소리 특징값만 `voices.json` 에 저장, 환자 목소리는 저장하지 않음 |
+| 말한 사람 표시 | 이 Mac (sherpa-onnx 화자 인식) | 외부 전송 없음. 목소리 특징값은 등록한 의사 것만 `voices.json` 에 저장, 환자 목소리 특징값은 만들어 두지 않음 |
 | 딕션 사전 (용어·교정) | 이 Mac | 외부 전송 없음. 용어와 "잘못 들린 말 → 바른 말" 문자열만 `diction.json` 에 저장 |
-| **요약** | **Claude 서비스 (Anthropic)** | **요약을 만들 때 그 진료의 전사문이 Claude Code CLI 를 통해 전송됩니다** |
-| 저장 | 사용자가 `내보내기…` 를 고른 경로만 | 자동 저장 없음. 앱을 닫으면 결과는 사라짐 |
+| **요약 — Claude Code 를 고른 경우** | **Claude 서비스 (Anthropic)** | **요약을 만들 때 그 진료의 전사문이 Claude Code CLI 를 통해 전송됩니다** |
+| 요약 — 로컬 모델을 고른 경우 | 이 컴퓨터 (llama.cpp) | 외부 전송 없음. 127.0.0.1 에서만, 실행마다 만든 열쇠로만 받는 llama-server, 로그 없음 |
+| **진료 기록** | **이 Mac** (`~/Library/Application Support/clinic-scribe/records`) | 진료마다 무음을 줄인 녹음(FLAC) · 전사문 · 요약을 자동 저장. 앱을 다시 열어도 남고, `진료 기록` 에서 지움. 자동으로 지우지는 않음 |
+| 내보내기 | 사용자가 `내보내기…` 를 고른 경로 | 진료 기록과 별도로 .md (+ 녹음 .wav) 파일로 저장 |
 
 - 검증과 테스트에는 **가상 진료 대화만** 쓰세요. 실제 환자 정보는 넣지 마세요.
 - 앱은 전사문·요약 원문을 콘솔이나 로그에 출력하지 않습니다(whisper-cli 표준출력도 버림).
 - Claude 호출은 `--no-session-persistence`(대화를 `~/.claude` 에 저장하지 않음), `--safe-mode`(CLAUDE.md·hooks·플러그인·MCP 끔 — 사용자 hook 이
   전사문을 기록하는 일을 막음), `--tools ""`(도구 없음)로 실행합니다. 요약 요청은 사용 중인 Claude 요금제 사용량에 포함됩니다.
-- 모델, 녹음, 전사문, 요약은 Git 에 넣지 않습니다(`.gitignore`). 모델은 repo 밖에 저장됩니다.
+- 모델, 녹음, 전사문, 요약은 Git 에 넣지 않습니다(`.gitignore`). 모델과 진료 기록은 repo 밖에 저장됩니다.
 
 ## 필요 환경
 
-- Apple Silicon macOS (M5 Pro, macOS 26 에서 확인)
-- [Homebrew](https://brew.sh) — whisper.cpp 설치용
-- Python 3.10 이상 (repo 안 `.venv` 에 설치되며 전역 Python 은 건드리지 않음)
-- [Claude Code](https://claude.com/claude-code) CLI(`claude`)와 로그인 — 요약용. 없어도 녹음·전사는 됩니다.
+| OS | 확인한 곳 | 준비할 것 |
+| --- | --- | --- |
+| macOS 12 이상 (Apple Silicon·Intel) | M5 Pro, macOS 26 (이 저장소를 만든 컴퓨터) | [Homebrew](https://brew.sh) (whisper.cpp 설치용) |
+| Windows 10·11 (x64·ARM64) | GitHub Actions `windows-2022` (`.github/workflows/tests.yml`) | 없음 (설치 스크립트가 공식 빌드를 받음) |
+| Linux x64·ARM64 (Ubuntu 22.04+·Debian 12+·Fedora 등 glibc 2.35+) | GitHub Actions `ubuntu-24.04` | `libportaudio2` `libxcb-cursor0` `fonts-noto-cjk` 등 (설치 스크립트가 빠진 것과 명령을 알려 줌) |
+
+- 모든 OS: Python 3.10~3.13 (repo 안 `.venv` 에 설치되며 전역 Python 은 건드리지 않음). 마이크는 내장·USB·블루투스·오디오 인터페이스 모두 됩니다.
+- 요약을 Claude Code 로 하면 [Claude Code](https://claude.com/claude-code) CLI 와 로그인 — '설치' 창이 공식 설치 프로그램으로 설치해 줍니다(로그인만 직접). 로컬 모델로 하면 필요 없습니다.
+- Windows·Linux 는 실제 컴퓨터 대신 GitHub 의 Windows·Linux 컴퓨터에서 설치·테스트를 돌려 확인합니다(아래 [테스트](#테스트)).
 
 ## 설치
 
-```bash
-./scripts/setup_macos.sh
-```
+| OS | 명령 (repo 폴더에서) |
+| --- | --- |
+| macOS | `./scripts/setup_macos.sh` |
+| Linux | `./scripts/setup_linux.sh` |
+| Windows | `scripts\setup_windows.bat` (탐색기에서 두 번 클릭해도 됨) |
 
-하는 일:
+세 스크립트는 맞는 Python(3.13→3.10)을 찾아 OS 공통 `scripts/setup.py` 를 실행합니다. 하는 일:
 
-1. `whisper-cli` 가 있으면 재사용하고, 없으면 `brew install whisper-cpp` (whisper.cpp 1.9.5, 의존성 ggml·llama.cpp·sdl2-compat 등이 함께 설치/갱신될 수 있음)
-2. repo 안 `.venv` 생성 후 `requirements.txt`, `requirements-dev.txt` 설치 (화자 인식 런타임 `sherpa-onnx` 포함)
-3. 모델 다운로드 (아래 표: Whisper, Silero VAD, 화자 인식) — `.part` 로 받다가 **크기와 SHA-256 이 모두 맞을 때만** 최종 파일로 옮김
-   - 다시 실행하면 검증된 파일은 재사용하고, 끊긴 `.part` 는 이어받습니다. 손상된 부분 파일은 지우고 다시 받습니다.
-4. `claude` 실행 파일과 로그인 상태 확인 (전사문은 보내지 않음)
-5. 가상 음성(`say -v Yuna`)으로 whisper-cli + 모델 + VAD 자체 점검
+1. **whisper.cpp** (`whisper-cli`·`whisper-vad-speech-segments`): macOS 는 `brew install whisper-cpp`, Windows·Linux 는 GitHub 공식 빌드 `b5454`(macOS Homebrew 와 같은 1.9.5)를 받아 SHA-256 확인 후 사용자 캐시에 풉니다. CPU 기능(SSE4.2~AVX-512)별 계산 모듈이 함께 들어 있어 어떤 x64·ARM64 CPU 에서도 돕니다.
+2. repo 안 `.venv` 생성 후 `requirements.txt`, `requirements-dev.txt` 설치 (Debian·Ubuntu 에서 `venv` 가 없으면 `sudo apt install python3.x-venv` 를 알려 줌)
+3. 모델 다운로드 (아래 표: Whisper, Silero VAD, 화자 인식) — `.part` 로 받다가 **크기와 SHA-256 이 모두 맞을 때만** 최종 파일로 옮김. 끊기면 다음에 이어받습니다.
+4. `claude` 와 로그인 상태 확인(전사문은 보내지 않음), 이 컴퓨터 사양과 로컬 모델별로 돌아가는지 표시. `--local-model qwen3-8b` 처럼 주면 로컬 모델도 받습니다.
+5. whisper.cpp 자체 점검: 만든 소리로 전사와 음성 구간 탐지를 실제로 한 번 돌림
+6. Linux: 마이크(PortAudio)·화면(Qt xcb)·한글 글꼴이 있는지 확인하고 없으면 `sudo apt install …` 명령을 알려 줌 (sudo 는 직접 실행)
+7. 클릭해서 여는 바로 가기: Windows 는 시작 메뉴·바탕 화면, Linux 는 앱 목록. macOS 는 `./scripts/make_launcher.sh` (아래 실행)
 
 설치나 다운로드가 막혀도 나머지 단계는 계속하고, 마지막에 막힌 단계와 직접 실행할 정확한 명령을 출력합니다(종료 코드 1).
 
+### 새 컴퓨터에서 처음 열 때 — '설치' 창
+
+설치 스크립트를 건너뛰었거나 whisper·모델이 없는 컴퓨터에서 앱을 열면, 또는 요약 방식을 아직 고르지 않았으면 '설치' 창이 뜹니다
+(나중에 `설정 → 요약 → 설치 · 요약 방식…` 에서 다시 열 수 있음).
+
+- **전사에 필요한 것**: whisper.cpp · Whisper 모델 · 음성 구간 모델 · 화자 인식 모델이 있는지(✓ 있음 / 받기 필요) 보여 줍니다.
+- **요약 방식**: `Claude Code`(품질이 가장 좋음, 요약할 때 전사문이 Anthropic 으로 전송, 로그인 필요) 또는 `로컬 모델`(이 컴퓨터에서만, 전송 없음).
+  - 로컬 모델은 이 컴퓨터의 CPU·메모리·GPU 를 읽어 모델마다 **✓ 원활 / △ 느림 / ✗ 메모리 부족** 과 요약 하나에 걸리는 대략의 시간을 보여 주고, 원활한 것 중 가장 좋은 모델을 추천합니다. 메모리가 모자라는 모델은 고를 수 없습니다.
+  - Claude Code 가 없으면 공식 설치 프로그램(`curl -fsSL https://claude.ai/install.sh | bash`, Windows `irm https://claude.ai/install.ps1 | iex`)으로 설치합니다. 로그인은 `로그인 창 열기`(터미널에서 `claude auth login`)로 직접 하고 `다시 확인` 을 누릅니다.
+- **`설치하고 시작`** 을 눌러야 받기 시작합니다. 진행 막대·`받기 취소` 가 있고, 받은 파일은 크기·SHA-256 을 확인한 뒤에만 씁니다. 취소하거나 끊기면 받은 부분을 남겨 두었다가 다음에 이어받습니다.
+
 ## 실행
+
+**클릭해서 열기 (앱 아이콘)**
+
+- **Windows**: 설치 스크립트가 만든 **시작 메뉴·바탕 화면의 `clinic-scribe`** (콘솔 창 없이 열림, 작업 표시줄에 앱 아이콘)
+- **Linux**: 설치 스크립트가 만든 **앱 목록의 `clinic-scribe`** (`~/.local/share/applications/clinic-scribe.desktop`)
+- **macOS**: 한 번만 만들어 두면 됩니다.
+
+```bash
+./scripts/make_launcher.sh        # macOS: ~/Applications/clinic-scribe.app 을 만든다
+```
+
+- 그다음부터는 **Spotlight(⌘ Space → `clinic`) → Enter**, 또는 Launchpad·Finder(홈 폴더 → 응용 프로그램)에서 `clinic-scribe` 를 클릭합니다. Dock 에 끌어다 두면 Dock 아이콘으로 엽니다.
+- 앱은 이 repo 의 가상환경으로 `python -m clinic_scribe` 를 그대로 실행합니다(`scripts/launcher.c`). Dock·메뉴 막대에 `clinic-scribe` 로 보이고, 마이크 권한도 `clinic-scribe` 앱으로 묻습니다(처음 녹음할 때 한 번 `허용`).
+- repo 를 옮겼거나 가상환경을 다시 만들었으면 `./scripts/make_launcher.sh` 를 다시 실행하세요(그러면 마이크 권한을 한 번 더 묻습니다). 지우려면 앱을 휴지통으로 옮기면 됩니다.
+- 열리지 않으면 이유를 알리는 경고창이 뜹니다. 자세한 오류는 터미널에서 `./scripts/run.sh` 로 실행하면 보입니다.
+
+**터미널에서 열기** (Windows 는 `scripts\run.bat`, 인자는 같음)
 
 ```bash
 ./scripts/run.sh                                   # 앱 실행 (간단 화면, 내장 마이크)
@@ -85,20 +125,21 @@
 
 ```
 clinic-scribe  녹음 · 전사 · 요약         [MacBook Pro 마이크 ⌄]  마이크 권한: 허용됨   설정   개발자 보기
-┌──────────────────────────┐ ┌ [진료 기록 3]  요약  대화 내용                          [요약 복사] ┐
-│      ( ■ 녹음 종료 )       │ │ [3] 10:20 ~                                              녹음 중 │
-│  원형 버튼: 대기 남색 /      │ │ [2] 10:12–10:19 · 07:12                                  요약 중… │
-│  녹음 중 빨간색 + 퍼지는 고리 │ │     다음 환자 신호 '들어오세요'                                     │
-│          03:24            │ │ [1] 10:02–10:11 · 09:05                              요약 준비됨 │
-│   ▁▃▆▇▅▃▁ ▂▅▇▆▃▁ 입력 막대   │ │     무음 90초                                                    │
-│ ( ● 녹음 중 · 진료 #3 … )   │ │                                                               │
-│ [Space] 녹음 시작 · 종료    │ │                                                               │
+┌──────────────────────────┐ ┌ [진료 기록 4]  요약  대화 내용                   삭제  [요약 복사] ┐
+│      ( ■ 녹음 종료 )       │ │ 오늘 · 11월 12일 (목)                                           │
+│  원형 버튼: 대기 남색 /      │ │ [14] 10:20 ~                                             녹음 중 │
+│  녹음 중 빨간색 + 퍼지는 고리 │ │ [13] 10:12–10:19 · 07:12                                 요약 중… │
+│          03:24            │ │      다음 환자 신호 '들어오세요'                                    │
+│   ▁▃▆▇▅▃▁ ▂▅▇▆▃▁ 입력 막대   │ │ [12] 10:02–10:11 · 09:05                             요약 준비됨 │
+│ ( ● 녹음 중 · 진료 #14 … )  │ │ 어제 · 11월 11일 (수)                                           │
+│ [Space] 녹음 시작 · 종료    │ │ [11] 17:40–17:52 · 12:01 · 의사 김원장                  요약 준비됨 │
 └──────────────────────────┘ └───────────────────────────────────────────────────────────────┘
 ```
 
 - 앱 전체가 **어두운 화면**으로 열립니다(시스템이 밝은 모드여도 설정·확인 창까지 어둡게). 창은 1040×640 으로 작게 열리고, `개발자 보기` 로 바꾸면 넓어집니다.
 - 대화 내용과 요약은 **숨김**이 기본입니다. 오른쪽 칸은 `진료 기록` 탭으로 열리고, `요약` / `대화 내용` 탭을 눌러야 보입니다. 새 녹음을 시작하면 `진료 기록` 탭으로 돌아갑니다.
-- `진료 기록` 에는 진료 번호·시간·상태·나눈 이유만 보입니다. 항목을 누르면 요약·대화 내용·복사가 그 진료를 가리킵니다.
+- `진료 기록` 에는 진료 번호·시간·상태·나눈 이유만 날짜별로 보입니다. 항목을 누르면 요약·대화 내용·복사가 그 진료를 가리킵니다.
+  앱을 닫았다 열어도 그대로 남아 있습니다(아래 [진료 기록](#진료-기록-저장삭제)).
 - 요약에 실패하면 원인 한 줄과 `요약 다시 시도` 버튼이 나옵니다(대화 내용은 남아 있음).
 - 마이크를 바꿔 꽂아도 됩니다. 마이크 목록을 펼칠 때마다 장치를 다시 읽고, 마지막에 고른 마이크가 없으면 시스템 기본 입력을 씁니다.
   녹음 중에 마이크가 빠지면 그때까지 녹음한 내용으로 전사합니다.
@@ -129,6 +170,31 @@ clinic-scribe  녹음 · 전사 · 요약         [MacBook Pro 마이크 ⌄]  �
 
 ## 요약
 
+### 요약 방식: Claude Code 또는 로컬 모델
+
+| | Claude Code | 로컬 모델 (llama.cpp + Qwen3) |
+| --- | --- | --- |
+| 전사문 | 요약할 때 Anthropic 으로 전송 | **이 컴퓨터 밖으로 나가지 않음** |
+| 품질 | 가장 좋음 (아래 비교에서 사실을 빠뜨리지 않음) | 30B-A3B 가 가장 좋지만 조건·부정 소견을 빠뜨린 적이 있음 (아래 [비교](#로컬-모델ollama-비교--실험)) |
+| 필요한 것 | Claude Code 설치·로그인, 인터넷 | 처음 한 번 모델 받기 (2.5~18.6GB), 메모리 |
+| 속도 | 요약 1회 3~10초 | Apple Silicon 은 1분 이내, Windows·Linux 는 CPU 로 1~6분 (모델·CPU 에 따라) |
+
+로컬 모델은 Qwen3 (Apache-2.0) Q4_K_M 입니다. '설치' 창이 이 컴퓨터에 맞춰 판단합니다.
+
+| 모델 | 받는 크기 | 필요 메모리 | 메모리 16GB 사무용 PC (CPU) | Apple Silicon 64GB |
+| --- | --- | --- | --- | --- |
+| Qwen3 4B | 2.5GB | 약 5GB | ✓ 원활 · 약 2분 (추천) | ✓ 원활 |
+| Qwen3 8B | 5.0GB | 약 8GB | △ 느림 · 약 3분 | ✓ 원활 |
+| Qwen3 14B | 9.0GB | 약 12GB | △ 느림 · 약 6분 | ✓ 원활 |
+| Qwen3 30B-A3B | 18.6GB | 약 21GB | ✗ 메모리 부족 | ✓ 원활 · 1분 이내 (추천) |
+
+- 필요 메모리 = 모델 + 문맥(16K). 운영체제·앱·Whisper 몫으로 4GB 를 남기고 판단합니다. 시간은 '요약 하나 ≈ 700 낱말'을 메모리 대역폭으로 어림한 값입니다.
+- 실행: `llama-server`(llama.cpp 공식 빌드 `b12138`, SHA-256 확인)를 앱이 켜져 있는 동안 한 번 띄워 둡니다(처음 요약 때 모델을 올림). 127.0.0.1 의 빈 포트에서만, 실행마다 만든 열쇠로만 받고, 로그는 버립니다. 앱을 닫으면 끕니다.
+- Claude 와 **같은 작성 규칙·JSON 형식**으로 요청하고(Qwen3 생각 모드는 끔), 결과는 같은 화면·복사·자동 점검·진료 기록을 거칩니다. 초안에 `Qwen3 8B (이 컴퓨터)` 처럼 모델 이름이 남습니다.
+- macOS 는 GPU(Metal)로, Windows·Linux 는 CPU 로 돕니다(NVIDIA·AMD GPU 가속 빌드는 아직 쓰지 않음).
+
+### 요약 종류
+
 오른쪽 위(개발자 보기) 또는 `설정…` 에서 요약 종류를 고릅니다. 바꾼 뒤 `요약 다시 시도` 를 누르면 다시 녹음하지 않고 같은 전사문으로 다시 요약합니다.
 
 - **주요 내용 요약 (기본)**: `한 줄 요약 / 주요 내용(주제별 묶음) / 할 일·결정 사항 / 확인 필요`.
@@ -138,12 +204,49 @@ clinic-scribe  녹음 · 전사 · 요약         [MacBook Pro 마이크 ⌄]  �
 - **진료 차트 초안 (검토용)**: `주호소·현병력 / 대화에서 확인된 진찰·검사 / 의사가 언급한 평가·계획 / 확인 필요`, 항목마다 (환자)/(의사)/(불명확)과 근거 문장, 전사문 대조 자동 점검.
 - 두 종류 모두 대화에 없는 진단·정상 소견·처방·용량을 덧붙이지 않고, 전사문 안의 지시는 따르지 않으며, 약명·숫자·부정 표현·화자가 애매하면 `확인 필요` 에 남깁니다.
 
+## 진료 기록 (저장·삭제)
+
+진료가 끝나면 따로 누르지 않아도 진료 기록에 저장됩니다. 앱을 다시 열면 날짜별 목록으로 보이고, 누르면 요약·대화 내용이 열립니다.
+
+| 항목 | 내용 |
+| --- | --- |
+| 저장하는 것 | 진료마다 **무음을 줄인 녹음**(16 kHz mono 무손실 FLAC, 말소리 1분에 약 1 MB) · 전사문(말한 사람·고친 말 포함) · 요약 · 상태 |
+| 무음 줄이기 | Silero VAD 음성 구간 기준으로 1.2초보다 긴 무음을 1.2초로 줄입니다. 말소리는 한 샘플도 바꾸지 않고, 말 사이의 짧은 쉼은 그대로 둡니다. 전사문 시각도 줄인 녹음 기준으로 옮겨 녹음과 맞춥니다 |
+| 저장 시점 | 전사를 시작할 때 받은 녹음을 먼저 저장 → 전사가 끝나면 무음을 줄인 녹음으로 교체 → 요약·전사문 고쳐 쓰기·내보내기 때마다 갱신 |
+| 삭제 | 기록을 고르고 오른쪽 위 `삭제`(또는 기록을 오른쪽 클릭 → `기록 삭제…`) → 확인. 녹음 파일과 전사문·요약을 지우고, DB 안에서도 0 으로 덮습니다. 되돌릴 수 없습니다. 녹음 중인 진료는 지울 수 없습니다 |
+| 처리 도중 종료 | 전사·요약 중에 앱을 닫으면(종료할 때 한 번 묻습니다) 다음에 열 때 `전사 실패`/`요약 실패` 로 보이고, 고르면 `전사 다시 시도`/`요약 다시 시도` 로 이어서 처리합니다 |
+| 진료 번호 | 저장소가 매겨 앱을 다시 열어도 이어집니다. 지운 번호는 다시 쓰지 않습니다 |
+| 위치 | `~/Library/Application Support/clinic-scribe/records/records.db`(SQLite) + `audio/<번호>.flac`. 폴더 700 · 파일 600 (이 사용자만) |
+
+- 끝난 진료는 저장되어 있으므로 앱을 닫을 때 묻지 않습니다. 녹음 중이거나 전사·요약 중일 때만 묻습니다.
+- 자동으로 지우는 보관 기간은 없습니다. 기록을 한꺼번에 지우려면 앱을 닫고 `records` 폴더를 지우세요.
+- 진료 기록에는 환자 목소리와 대화 내용이 들어 있습니다. 실제 환자 정보로 쓰기 전에는 보관 기간·동의·접근 관리 기준을 먼저 정하세요.
+
+## 마이크 (내장·외장)
+
+어떤 입력 장치든 위쪽 마이크 목록에서 고릅니다. 목록을 펼칠 때마다 새로 꽂은 장치까지 다시 읽습니다.
+
+- **장치는 이름으로 기억**합니다. 다른 컴퓨터로 옮겨 같은 이름의 장치가 없으면 그 컴퓨터의 시스템 기본 입력을 씁니다.
+- 장치가 지원하는 샘플레이트·채널(최대 2)로 녹음하고 전사 직전에 16 kHz mono 로 바꿉니다: USB 마이크, 블루투스 헤드셋(8·16 kHz), 오디오 인터페이스(44.1·48·96 kHz) 모두 됩니다.
+  멀티 채널 오디오 인터페이스는 **1·2번 입력**에 마이크를 꽂으세요.
+- 녹음 중에 장치를 뽑으면 그때까지 녹음한 것으로 전사합니다(`입력 끊김`).
+- **Windows** 는 같은 마이크가 오디오 방식(MME·DirectSound·WASAPI)마다 겹쳐 나오는데, 한 번씩만 보여 줍니다(어떤 샘플레이트든 Windows 가 맞춰 주는 MME 로 열고, 31자로 잘린 이름은 전체 이름으로).
+- **Linux** 는 ALSA 가상 장치(sysdefault, dsnoop 등)를 숨기고 `default`·`pipewire`·`pulse` 와 실제 하드웨어만 보여 줍니다. 보통은 `default` 를 고르고 소리 설정에서 입력 장치를 바꾸면 됩니다.
+- 맥북은 덮개를 닫으면(클램쉘) 내장 마이크가 하드웨어로 꺼지므로 다른 입력 장치를 자동으로 고릅니다.
+
 ## 마이크 권한
+
+| OS | 권한 |
+| --- | --- |
+| macOS | 마이크 권한은 **앱을 띄운 프로그램**에 붙습니다 (아래 표). 처음 녹음할 때 묻습니다 |
+| Windows | **설정 → 개인 정보 및 보안 → 마이크** 의 `마이크 액세스` 와 `데스크톱 앱이 마이크에 액세스하도록 허용` 이 켜져 있어야 합니다. 앱이 이 설정을 읽어 꺼져 있으면 녹음 전에 알려 줍니다(관리 정책으로 막힌 경우 포함) |
+| Linux | 앱별 권한이 없습니다(`해당 없음`). 소리가 0 만 들어오면 소리 설정(PipeWire·PulseAudio)의 입력 장치·음소거를 안내합니다 |
 
 macOS 는 마이크 권한을 **앱을 띄운 프로그램**에 줍니다. `python` 은 앱 번들이 아니므로 실행 방식에 따라 허용할 앱이 다릅니다.
 
 | 실행 방식 | 권한을 허용할 앱 |
 | --- | --- |
+| `clinic-scribe.app` (Spotlight·Dock·Finder) | clinic-scribe |
 | 터미널.app 에서 `./scripts/run.sh` | 터미널 |
 | iTerm / Warp / Ghostty | 해당 터미널 앱 |
 | VS Code·Cursor 통합 터미널 | Visual Studio Code / Cursor |
@@ -152,7 +255,7 @@ macOS 는 마이크 권한을 **앱을 띄운 프로그램**에 줍니다. `pyth
 - 확인 위치: **시스템 설정 → 개인정보 보호 및 보안 → 마이크** 에서 위 앱을 켭니다. 켠 뒤에는 그 앱을 완전히 종료했다가 다시 실행하세요.
 - 처음 녹음을 시작하면 macOS 권한 대화상자가 뜹니다. 화면 위쪽 오른쪽에 현재 권한 상태(허용됨/거부됨/아직 묻지 않음)가 보입니다.
 - 거부 상태에서 녹음하면 macOS 는 오류 대신 **완전한 0(디지털 무음)** 만 보냅니다. 앱은 1.5초 안에 이를 감지해 권한 확인 안내를 띄웁니다.
-- 권한 요청을 처음 상태로 되돌리기: `tccutil reset Microphone com.apple.Terminal` (터미널 기준, 다른 앱은 번들 ID 사용)
+- 권한 요청을 처음 상태로 되돌리기: `tccutil reset Microphone com.apple.Terminal` (터미널 기준, 다른 앱은 번들 ID 사용 · 앱 아이콘은 `local.clinic-scribe`)
 - 입력 장치가 없거나 스트림을 열 수 없으면 원인이 표시됩니다. 그때도 `오디오 파일 불러오기…`(개발자 보기)로 같은 흐름을 테스트할 수 있습니다.
 - 녹음 중에는 메뉴 막대에 주황색 마이크 표시가 켜집니다. 녹음 종료·취소·자동 멈춤·앱 종료 시 바로 꺼져야 정상입니다.
 
@@ -160,13 +263,21 @@ macOS 는 마이크 권한을 **앱을 띄운 프로그램**에 줍니다. `pyth
 
 | 항목 | 경로 | 출처 |
 | --- | --- | --- |
-| Whisper 모델 | `~/.cache/clinic-scribe/models/ggml-large-v3-turbo-q5_0.bin` (574,041,195 bytes, SHA-256 `3942217…ffa7e2`) | https://huggingface.co/ggerganov/whisper.cpp |
-| Silero VAD 모델 | `~/.cache/clinic-scribe/models/ggml-silero-v6.2.0.bin` (885,098 bytes, SHA-256 `2aa269b…fb6987`) | https://huggingface.co/ggml-org/whisper-vad (whisper.cpp 1.9.5 의 `download-vad-model.sh` 가 받는 공식 변환본) |
-| 화자 인식 모델 | `~/.cache/clinic-scribe/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` (28,281,164 bytes, SHA-256 `aa3cfc1…0ceba2`) | https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models (배포의 `checksum.txt` 와 같은 값) |
-| whisper.cpp | `/opt/homebrew/bin/whisper-cli`, `whisper-vad-speech-segments` | Homebrew `whisper-cpp` |
-| 설정 | `~/Library/Application Support/clinic-scribe/settings.json` | 앱 `설정…` |
-| 등록한 의사 목소리 | `~/Library/Application Support/clinic-scribe/voices.json` (이 사용자만 읽기 권한) | 앱 `의사 목소리` |
-| 딕션 사전 | `~/Library/Application Support/clinic-scribe/diction.json` | 앱 `의사 목소리` › `딕션 사전`, 전사문에서 고쳐 쓰기 |
+| Whisper 모델 | `<캐시>/models/ggml-large-v3-turbo-q5_0.bin` (574,041,195 bytes, SHA-256 `3942217…ffa7e2`) | https://huggingface.co/ggerganov/whisper.cpp |
+| Silero VAD 모델 | `<캐시>/models/ggml-silero-v6.2.0.bin` (885,098 bytes, SHA-256 `2aa269b…fb6987`) | https://huggingface.co/ggml-org/whisper-vad (whisper.cpp 1.9.5 의 `download-vad-model.sh` 가 받는 공식 변환본) |
+| 화자 인식 모델 | `<캐시>/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` (28,281,164 bytes, SHA-256 `aa3cfc1…0ceba2`) | https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models (배포의 `checksum.txt` 와 같은 값) |
+| whisper.cpp | macOS `/opt/homebrew/bin/whisper-cli` · Windows·Linux `<캐시>/whisper.cpp/bin/whisper-cli(.exe)` | macOS Homebrew `whisper-cpp`, Windows·Linux GitHub 공식 빌드 `b5454` (SHA-256 고정) |
+| 로컬 요약 (선택) | `<캐시>/llama.cpp/bin/llama-server(.exe)` · `<캐시>/models/Qwen3-*-Q4_K_M.gguf` | GitHub llama.cpp 공식 빌드 `b12138` · Hugging Face `Qwen/Qwen3-*-GGUF` (모두 SHA-256 고정) |
+| 설정 | `<데이터>/settings.json` | 앱 `설정…` |
+| 등록한 의사 목소리 | `<데이터>/voices.json` (이 사용자만 읽기 권한) | 앱 `의사 목소리` |
+| 딕션 사전 | `<데이터>/diction.json` | 앱 `의사 목소리` › `딕션 사전`, 전사문에서 고쳐 쓰기 |
+| 진료 기록 | `<데이터>/records/` (`records.db` + `audio/<번호>.flac`, 이 사용자만 읽기 권한) | 진료가 끝나면 자동 저장, `진료 기록` 에서 삭제 |
+
+| | `<데이터>` (설정·목소리·사전·진료 기록) | `<캐시>` (모델·받은 프로그램) |
+| --- | --- | --- |
+| macOS | `~/Library/Application Support/clinic-scribe` | `~/.cache/clinic-scribe` |
+| Windows | `%LOCALAPPDATA%\clinic-scribe` (로밍 프로필로 다른 PC 에 복사되지 않는 곳) | `%LOCALAPPDATA%\clinic-scribe` |
+| Linux | `~/.local/share/clinic-scribe` (`$XDG_DATA_HOME`) | `~/.cache/clinic-scribe` (`$XDG_CACHE_HOME`) |
 
 - 모델 폴더는 `CLINIC_SCRIBE_MODEL_DIR`, 설정 파일은 `CLINIC_SCRIBE_SETTINGS` 환경 변수로 바꿀 수 있습니다(설치 스크립트도 같은 변수를 따름).
 - `설정…` 에서 whisper-cli·모델·VAD 모델·`claude` 경로, Claude 모델 이름(기본 `claude-opus-5-5`), effort, 제한 시간, 요약 종류, 자동 요약 여부,
@@ -179,8 +290,12 @@ macOS 는 마이크 권한을 **앱을 띄운 프로그램**에 줍니다. `pyth
 
 의사는 정해져 있고 환자는 매번 다르므로, **의사 목소리만 등록**해 두고 발화마다 등록한 목소리와 비교합니다.
 
-1. 위쪽 `의사 목소리` → 이름(예: 김원장)을 쓰고 **본인 동의 확인**에 표시합니다.
+1. 위쪽 `의사 목소리` → 이름(예: 김원장)을 쓰고 **진료과**를 고른 뒤 **본인 동의 확인**에 표시합니다.
+   이름을 잘못 썼으면 목록에서 고르고 `이름 바꾸기…` — 딕션 사전과 지난 진료 기록의 이름도 함께 바뀝니다(목소리 특징값은 그대로).
 2. **`따라 읽기 시작 (약 1분)`**: 의사가 컴퓨터 앞에 앉아 화면에 하나씩 나오는 짧은 진료 문장 12개를 따라 읽습니다.
+   **문장은 고른 진료과에서 자주 쓰는 말과 약·검사 이름으로 나옵니다** — 내과·가정의학과, 소아청소년과, 이비인후과, 정형외과, 피부과,
+   산부인과, 비뇨의학과, 안과, 정신건강의학과, 신경과 (예: 정형외과 `셀레콕시브는 위에 부담이 적은 소염진통제예요.`, 소아청소년과
+   `독감 검사가 양성이라 오셀타미비르를 5일 동안 먹이세요.`). 고른 과는 의사마다 기억해서 다시 학습할 때 그대로 고릅니다.
    다 읽고 0.9초 쉬면 저절로 다음 문장으로 넘어가고, `다시 읽기`·`다음`도 있습니다. 사전에 그 의사의 용어가 있으면 그 용어가 든 문장을 먼저 읽습니다.
    - 끝나면 이 Mac 에서 분석합니다(가상 음성으로 약 5초): 같은 녹음으로 **목소리를 등록**하고, 받아 적은 글을 읽은 문장(정답)과
      낱말 단위로 맞춰 **이 의사의 말이 어떻게 잘못 들리는지** 찾습니다(띄어쓰기·문장부호 차이는 무시).
@@ -198,7 +313,7 @@ macOS 는 마이크 권한을 **앱을 띄운 프로그램**에 줍니다. `pyth
 | 기준 | 유사도 0.55 이상이면 그 의사, 아니면 `환자`(등록되지 않은 목소리 — 보호자일 수도 있음). 설정 › 말한 사람에서 조정 |
 | 판단하지 않는 발화 | 1초보다 짧은 말(`네`, `음`), 음성이 감지되지 않은 곳의 전사 |
 | 속도 | 15초 소리의 특징값 계산 약 0.05초 (M5 Pro). 전사가 끝난 뒤 같은 작업 안에서 붙임 |
-| 저장 | 의사 목소리 특징값만 `voices.json` 에 저장(파일 권한 600). 녹음 원본과 환자 목소리는 저장하지 않음. 등록 창에서 삭제 |
+| 저장 | 의사 목소리 특징값만 `voices.json` 에 저장(파일 권한 600). 등록에 쓴 녹음 원본과 환자 목소리 특징값은 저장하지 않음. 등록 창에서 삭제 (진료 녹음은 진료 기록에 따로 저장) |
 
 - 목소리 특징값은 개인정보보호법상 **민감정보(생체인식정보)** 로 다뤄야 하므로 등록 전에 본인 동의를 받으세요.
 - 가상 음성으로만 검증했습니다(가상 진료의 의사 역할 0.82~0.94 / 환자 역할 0.14~0.48). 실제 사람 목소리로는 아직 확인하지 않았으니,
@@ -280,7 +395,8 @@ CLINIC_SCRIBE_TEST_CLAUDE=1 .venv/bin/python -m pytest tests/test_integration_cl
 
 ## 로컬 모델(Ollama) 비교 — 실험
 
-앱은 Ollama 를 쓰지 않습니다. 로컬 모델로도 충분한지 보려고 같은 가상 전사문·같은 요약 지시·같은 형식으로 비교했습니다(M5 Pro 64GB, Q4 양자화, 생각 모드 끔).
+앱의 로컬 요약은 llama.cpp 로 돌고 Ollama 는 쓰지 않습니다. 아래는 같은 Qwen3 모델을 Ollama 로 돌려 Claude 와 품질을 비교한 실험입니다
+(같은 가상 전사문·같은 요약 지시·같은 형식, M5 Pro 64GB, Q4 양자화, 생각 모드 끔).
 
 | 모델 | 첫 로딩 | 요약 1회 | 짧은 진료 대화의 핵심 사실 (3일·식후·발열 없음·지속 시 검사 논의) | 지시문 주입 |
 | --- | --- | --- | --- | --- |
@@ -323,6 +439,12 @@ CLINIC_SCRIBE_TEST_CLAUDE=1 .venv/bin/python -m pytest tests/test_integration_cl
 이 Mac 에서 `파일 출력이 되는 한국어 음성`은 Yuna 뿐이라(다른 음성은 빈 파일), 의사 역할은 Yuna 를 낮은 음높이로 바꿔 만듭니다.
 GUI 테스트는 마이크 대신 가짜 입력 스트림으로 녹음 버튼·스페이스바·자동 진료 나누기·녹음 자동 멈춤 흐름을 실제 whisper.cpp 로 확인합니다.
 
+**다른 OS**: 가상 음성은 macOS `say` 로 만들므로 Windows·Linux 에서는 Mac 에서 만든 `samples/` 를 복사해 씁니다(없으면 그 테스트만 건너뜀).
+OS 마다 다른 부분(경로·권한·장치 목록·프로세스 정리·한글 경로·Whisper 힌트)은 `tests/test_platforms.py` 가 이 컴퓨터에서 OS 를 바꿔 가며 확인하고,
+받기·풀기·사양 판단은 `tests/test_installer.py`, 로컬 요약은 가짜 llama-server 로 `tests/test_local_llm.py`, '설치' 창은 `tests/test_setup_dialog.py` 가 확인합니다.
+GitHub 에 push 하면 `.github/workflows/tests.yml` 이 macOS 에서 가상 음성을 만들어 **Windows·Linux·macOS 컴퓨터에서 설치 스크립트와 전체 테스트**를 돌립니다
+(실제 whisper.cpp 공식 빌드·모델을 받아 실제로 전사함).
+
 ### 수동 테스트 순서 (실제 내장 마이크)
 
 1. 터미널에서 `./scripts/run.sh` 실행 → 입력이 `MacBook Pro 마이크 (시스템 기본)` 인지 확인.
@@ -341,8 +463,14 @@ GUI 테스트는 마이크 대신 가짜 입력 스트림으로 녹음 버튼·�
 
 ## 알려진 한계
 
-- macOS 전용입니다. 설치·실행 스크립트(Homebrew, bash), 마이크 권한 확인(AVFoundation), 외부 프로그램 종료 방식, 설정 파일 위치가
-  macOS 기준이라 Windows 에서는 그대로 돌지 않습니다(화면·녹음·whisper.cpp·Claude CLI 자체는 Windows 에도 있음).
+- Windows·Linux 는 실제 컴퓨터에서 써 보지 않았습니다. OS 마다 다른 부분(경로·권한·장치 목록·프로세스 정리·한글 경로)은 이 Mac 에서 OS 를 바꿔 가며
+  테스트하고, 설치와 전체 테스트는 GitHub 의 Windows·Linux 컴퓨터에서 돌도록 해 두었습니다(`.github/workflows/tests.yml`, push 하면 돎).
+- **Windows 의 Whisper 힌트**: whisper.cpp Windows 빌드는 명령줄 인자를 시스템 코드 페이지로 받아 한글 힌트가 깨지므로, Windows 가 UTF-8 모드가
+  아니면 힌트의 영어 낱말(약명·검사명)만 넘깁니다. 딕션 사전의 교정(잘못 들린 말 → 바른 말)은 전사 뒤에 하므로 그대로 적용됩니다.
+  한글 용어 힌트까지 쓰려면 `설정 → 시간 및 언어 → 언어 및 지역 → 관리 언어 설정 → 시스템 로캘 변경 → 'Unicode UTF-8 사용(베타)'` 을 켭니다.
+  사용자 이름이 한글인 경로(`C:\Users\홍길동\…`)는 8.3 짧은 경로로 넘겨 그대로 됩니다.
+- **로컬 요약 모델**은 Windows·Linux 에서 CPU 로만 돌아(요약 1~6분) GPU 가 있어도 쓰지 않습니다. 품질은 Claude 보다 낮을 수 있으니 요약을 꼭 전사문과 대조하세요.
+- **Linux 한글 입력**: IBus 는 그대로 되고, fcitx5 는 Qt6 용 입력 플러그인이 필요할 수 있습니다.
 - 말한 사람 표시는 **등록한 의사 목소리와 비교**하는 방식이고, 실제 사람 목소리로는 아직 검증하지 않았습니다.
   의사를 등록하지 않으면 화자 표시가 없고, 환자/의사 구분은 Claude 가 발화 내용으로 추정하며 애매하면 `확인 필요` 에 남깁니다.
 - 등록하지 않은 사람끼리(환자와 보호자 등)는 구분하지 않습니다(diarization 없음).
@@ -351,18 +479,21 @@ GUI 테스트는 마이크 대신 가짜 입력 스트림으로 녹음 버튼·�
 - 딕션 사전의 교정은 글자 그대로 바꿉니다. 너무 짧은 말(두 글자 미만)은 쓸 수 없고, 다른 낱말 안에 들어 있는 말도 바뀌니 충분히 길게 고르세요.
 - 자동 진료 나누기의 신호 단어는 실시간 전사(짧은 조각)에 의존하므로 잘못 들으면 놓치거나 잘못 나눌 수 있습니다. 확실한 경계는 스페이스바입니다.
 - 실시간 발화 감지는 소리 크기 기반이라 시끄러운 환경에서는 클립이 잘게 나뉘거나 늦게 닫힐 수 있습니다.
-- 진료 기록은 앱이 켜져 있는 동안만 메모리에 있습니다(최근 5개 진료만 녹음을 보관해 다시 전사·재생 가능). 필요한 결과는 `요약 복사` 또는 `내보내기…`.
+- 진료 기록은 이 컴퓨터 한 대에만 쌓입니다(다른 컴퓨터와 동기화·백업 없음). 컴퓨터를 옮기면 `<데이터>/records` 폴더를 함께 옮기세요.
+- 저장된 녹음 전체를 앱 안에서 처음부터 듣는 재생기는 아직 없습니다(개발자 보기의 구간 재생, `내보내기…` 의 .wav 로 확인).
 - 영어 약명은 **전사 힌트 프롬프트**(설정)에 들어 있는 단어일수록 원문 표기로 남습니다. 자주 쓰는 약명을 추가하세요.
 
 ## 구조
 
 ```
 clinic_scribe/
-  app.py                  진입점 (--open, --demo, --summary)
-  config.py               설정·경로·VAD·자동 나누기 기본값
+  app.py                  진입점 (--open, --demo, --summary). Windows·Linux 는 어두운 Fusion 팔레트
+  config.py               설정·OS 별 경로(데이터·캐시·짧은 경로)·VAD·자동 나누기 기본값
+  installer.py            받기: 공식 빌드·모델 목록(SHA-256 고정), 컴퓨터 사양·모델 판단, 받기·검증·풀기, Claude Code 설치
+  local_llm.py            로컬 요약 모델 실행 (llama-server, 127.0.0.1·열쇠·스트리밍·취소)
   audio.py                16 kHz mono PCM 변환, WAV 입출력
   recorder.py             sounddevice 녹음, 입력 장치 목록, 데모 입력, 구간 잘라내기
-  mic_permission.py       macOS 마이크 권한(AVFoundation) 확인·요청
+  mic_permission.py       마이크 권한: macOS(AVFoundation)·Windows(개인 정보 설정)·Linux(해당 없음), 덮개 닫힘
   whisper.py              whisper-cli / whisper-vad-speech-segments 호출·해석, 구간 시각 보정
   live_monitor.py         녹음 중 발화 시작·무음 종료 감지 (클립 나누기)
   live_transcriber.py     녹음 중 클립 단위 실시간 전사 (미리보기·신호 단어 감지)
@@ -370,14 +501,18 @@ clinic_scribe/
   speakers.py             말한 사람 알아보기: 의사 목소리 등록·특징값·발화별 화자 표시 (sherpa-onnx)
   diction.py              의사별 딕션 사전: 용어 힌트·교정·진료 의사 추정
   training.py             따라 읽기 학습: 문장 목록, 잘못 들린 말 찾기, 학습 전·후 비교
-  summarizer.py           Claude Code CLI 호출, 요약 지시·형식, 오류 분류
+  summarizer.py           요약: Claude Code CLI 호출 / 로컬 모델, 요약 지시·형식, 오류 분류
   conversation_summary.py 주요 내용 요약 구조·표시
   chart.py                진료 차트 초안 구조·표시·전사문 대조 자동 점검
   session.py              진료 하나의 녹음·전사·요약 묶음
+  records.py              진료 기록 저장소: SQLite + 무음을 줄인 녹음(FLAC), 저장·삭제·다시 열기
   export.py               내보내기 (.md / .wav)
   procutil.py             외부 프로세스 실행·취소·종료 정리
   ui/                     PySide6 화면 (simple_view = 간단 화면, main_window = 개발자 보기·전체 흐름, theme = 공통 어두운 디자인,
-                          voice_dialog = 의사 목소리 등록, training_panel = 따라 읽기, diction_dialog = 딕션 사전·고쳐 쓰기)
-scripts/  setup_macos.sh · run.sh · make_test_audio.py · bench_ollama.py(실험)
+                          voice_dialog = 의사 목소리 등록, training_panel = 따라 읽기, diction_dialog = 딕션 사전·고쳐 쓰기,
+                          setup_dialog = '설치' 창: 빠진 것 받기·요약 방식·로컬 모델)
+scripts/  setup.py (OS 공통 설치) · setup_macos.sh · setup_linux.sh · setup_windows.bat · run.sh · run.bat
+          make_launcher.sh + launcher.c (macOS 앱 아이콘) · make_test_audio.py · bench_ollama.py(실험)
+.github/workflows/tests.yml   Windows·Linux·macOS 에서 설치·전체 테스트
 tests/    단위·통합·GUI 테스트 (가짜 claude 실행 파일, 가짜 마이크 입력 포함)
 ```

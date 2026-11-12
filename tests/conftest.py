@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,7 +29,13 @@ def _isolated_settings(tmp_path, monkeypatch):
 def samples() -> Path:
     """가상 진료 대화 음성. 없으면 scripts/make_test_audio.py 로 만든다 (macOS `say` 필요)."""
     if any(not (SAMPLES / name).is_file() for name in REQUIRED_SAMPLES):
-        subprocess.run([sys.executable, str(REPO / "scripts" / "make_test_audio.py"), str(SAMPLES)], check=True)
+        if shutil.which("say") is None:
+            pytest.skip("가상 음성(samples/)은 macOS 의 say 로 만듭니다. Mac 에서 만든 samples 폴더를 복사하면 이 OS 에서도 실행됩니다.")
+        made = subprocess.run([sys.executable, str(REPO / "scripts" / "make_test_audio.py"), str(SAMPLES)],
+                              capture_output=True, text=True)
+        if made.returncode != 0:
+            pytest.skip("가상 음성을 만들지 못했습니다 (macOS 한국어 음성 Yuna 필요): "
+                        + (made.stderr.strip().splitlines() or ["?"])[-1])
     return SAMPLES
 
 
@@ -51,7 +58,7 @@ def speaker_encoder(settings):
     try:
         return SpeakerEncoder(settings.speaker_model_path())
     except SpeakerError as exc:
-        pytest.skip(f"화자 인식 모델이 없습니다 ({exc}). ./scripts/setup_macos.sh 를 먼저 실행하세요.")
+        pytest.skip(f"화자 인식 모델이 없습니다 ({exc}). 설치 스크립트를 먼저 실행하세요.")
 
 
 @pytest.fixture(scope="session")
@@ -67,7 +74,7 @@ def whisper_runner(settings):
         )
     )
     if runner.problems(need_vad=True) or not runner.vad_tool:
-        pytest.skip("whisper.cpp 또는 모델이 없습니다. ./scripts/setup_macos.sh 를 먼저 실행하세요.")
+        pytest.skip("whisper.cpp 또는 모델이 없습니다. 설치 스크립트(setup_macos.sh · setup_linux.sh · setup_windows.bat)를 먼저 실행하세요.")
     return runner
 
 

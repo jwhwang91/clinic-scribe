@@ -159,3 +159,17 @@ def test_lines_split_where_speaker_changes_even_without_punctuation(samples, man
     for line in lines:
         expected = "김원장" if roles(line) == {"doctor"} else PATIENT
         assert line.speaker == expected, line.text
+
+
+def test_rename_keeps_voiceprint_and_refuses_taken_names(tmp_path):
+    book = VoiceBook(tmp_path / "voices.json")
+    book.enroll("황재", [np.ones(192, np.float32)], 30.0)
+    book.enroll("김원장", [np.arange(192, dtype=np.float32) + 1.0], 20.0)
+    working_copy = book.copy()  # 전사 중인 작업 스레드가 쓰는 사본
+    assert book.rename("황재", "  황재웅 ") == "황재웅"
+    assert book.names() == ["황재웅", "김원장"] and working_copy.names() == ["황재", "김원장"]
+    assert book.voices[0].embedding == working_copy.voices[0].embedding  # 목소리 특징값은 그대로
+    with pytest.raises(SpeakerError):
+        book.rename("황재웅", "김원장")  # 이미 있는 이름
+    with pytest.raises(SpeakerError):
+        book.rename("황재웅", "환자")

@@ -1,4 +1,4 @@
-"""의사별 딕션 사전: 자주 쓰는 용어와 '잘못 들린 말 → 바른 말' 교정 (이 Mac 에서 처리).
+"""의사별 딕션 사전: 자주 쓰는 용어와 '잘못 들린 말 → 바른 말' 교정 (이 컴퓨터에서 처리).
 
 - 용어: 그 의사가 진료한 녹음을 전사할 때 Whisper 힌트 앞에 넣어 처음부터 더 잘 알아듣게 한다.
 - 교정: 전사 뒤 그 의사의 발화에서(공통 교정은 모든 발화에서) 잘못 들린 말을 바른 말로 바꾼다. 원래 들린 말은 남긴다.
@@ -131,6 +131,17 @@ class DictionBook:
             rules[_key(wrong)] = Correction(wrong, right)  # 같은 말은 나중 것이 이긴다
         self.entries[scope] = Entry(_dedupe(vocabulary), list(rules.values()))
         return dropped
+
+    def rename_scope(self, old: str, new: str) -> None:
+        """의사 이름이 바뀌면 그 의사의 사전도 옮긴다 (새 이름에 이미 사전이 있으면 합친다)."""
+        if old == new or old not in self.entries:
+            return
+        moved = self.entries.pop(old)
+        if new in self.entries:
+            kept = self.entries[new]
+            self.set_entry(new, kept.vocabulary + moved.vocabulary, kept.corrections + moved.corrections)
+        else:
+            self.entries[new] = moved
 
     def add_correction(self, scope: str, wrong: str, right: str, add_term: bool = True) -> Correction:
         """교정 하나를 더한다 (전사문에서 고쳐 쓰기). 바른 말은 용어 목록에도 넣어 다음부터 처음부터 바르게 받아 적게 한다."""

@@ -164,3 +164,15 @@ def test_doctor_terms_and_corrections_fix_drug_names(samples, whisper_runner, sp
     assert len(final) >= 3  # 힌트 때문에 의사·환자 말이 한 줄로 합쳐지지 않는다
     patient = [s for s in final if s.speaker == PATIENT]
     assert patient and all(not s.corrections for s in patient)  # 환자 말에는 의사 사전을 쓰지 않는다
+
+
+def test_rename_scope_moves_and_merges_dictionary(tmp_path):
+    book = DictionBook(tmp_path / "diction.json")
+    book.add_correction("황재", "트림에 부티는", "트리메부틴은")
+    book.rename_scope("황재", "황재웅")
+    assert book.doctors() == ["황재웅"] and book.entry("황재웅").corrections[0].right == "트리메부틴은"
+    book.add_correction("황재", "현타객", "현탁액")  # 옛 이름으로 다시 생긴 사전은 합친다
+    book.rename_scope("황재", "황재웅")
+    assert book.doctors() == ["황재웅"] and {c.right for c in book.entry("황재웅").corrections} == {"트리메부틴은", "현탁액"}
+    book.rename_scope("없는 이름", "아무개")  # 사전이 없으면 아무 일도 없다
+    assert book.doctors() == ["황재웅"]

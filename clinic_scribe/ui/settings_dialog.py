@@ -1,7 +1,8 @@
-"""설정 창: 실행 파일·모델 경로, Whisper 옵션, Claude CLI 옵션, 진료 나누기, 말한 사람 표시."""
+"""설정 창: 실행 파일·모델 경로, Whisper 옵션, 요약(Claude Code CLI 또는 로컬 모델) 옵션, 진료 나누기, 말한 사람 표시."""
 
 from __future__ import annotations
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QPushButton,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -27,17 +29,20 @@ from clinic_scribe.config import (
     default_model_dir,
     settings_path,
 )
+from clinic_scribe import installer
 from clinic_scribe.ui.widgets import PathField
 
 
 class SettingsDialog(QDialog):
+    setup_requested = Signal()  # '설치 · 요약 방식…' 을 눌렀다 (메인 창이 설치 창을 연다)
+
     def __init__(self, settings: Settings, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("설정")
         self.settings = settings
         s = settings
 
-        whisper_box = QGroupBox("전사 (whisper.cpp, 이 Mac 에서 처리)")
+        whisper_box = QGroupBox("전사 (whisper.cpp, 이 컴퓨터에서 처리)")
         wf = QFormLayout(whisper_box)
         self.whisper_cli = PathField(s.whisper_cli, f"자동: {s.whisper_cli_path() or '찾지 못함'}", "whisper-cli 선택")
         self.whisper_model = PathField(s.whisper_model, str(s.whisper_model_path()), "Whisper 모델 선택")
@@ -57,8 +62,17 @@ class SettingsDialog(QDialog):
         wf.addRow("전사 힌트 프롬프트", self.prompt)
         wf.addRow("VAD 음성 판정 임계값", self.vad_threshold)
 
-        claude_box = QGroupBox("차트 초안 요약 (Claude Code CLI · 전사문이 Claude 서비스로 전송됨)")
+        if s.summary_engine == "local":
+            model = installer.local_model(s.local_model)
+            engine = f"로컬 모델 {model.label if model else s.local_model} · 이 컴퓨터에서만 (전송 없음)"
+        else:
+            engine = "Claude Code CLI · 전사문이 Claude 서비스로 전송됨"
+        claude_box = QGroupBox(f"요약 ({engine})")
         cf = QFormLayout(claude_box)
+        self.setup_btn = QPushButton("설치 · 요약 방식…")
+        self.setup_btn.setToolTip("요약을 Claude Code 로 할지 로컬 모델로 할지 고르고, 필요한 프로그램·모델을 받습니다.")
+        self.setup_btn.clicked.connect(self.setup_requested)
+        cf.addRow("요약 방식", self.setup_btn)
         self.claude_cli = PathField(s.claude_cli, f"자동: {s.claude_cli_path() or '찾지 못함'}", "claude 실행 파일 선택")
         self.claude_model = QLineEdit(s.claude_model)
         self.claude_model.setPlaceholderText(DEFAULT_CLAUDE_MODEL)
@@ -116,7 +130,7 @@ class SettingsDialog(QDialog):
         sf.addRow("최소 진료 길이", self.min_session)
         sf.addRow("녹음 자동 멈춤 (말 없음)", self.auto_stop)
 
-        speaker_box = QGroupBox("말한 사람 표시 (등록한 의사 목소리와 비교, 이 Mac 에서 처리)")
+        speaker_box = QGroupBox("말한 사람 표시 (등록한 의사 목소리와 비교, 이 컴퓨터 에서 처리)")
         pf = QFormLayout(speaker_box)
         self.speaker_model = PathField(s.speaker_model, str(s.speaker_model_path()), "화자 인식 모델 선택")
         self.speaker_threshold = QDoubleSpinBox()

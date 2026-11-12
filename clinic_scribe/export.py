@@ -1,4 +1,4 @@
-"""내보내기: 사용자가 고른 경로에만 결과를 저장한다 (자동 저장 없음)."""
+"""내보내기: 사용자가 고른 경로에 결과를 .md (+ 녹음 .wav) 로 저장한다. 앱 안의 진료 기록 저장은 records.py."""
 
 from __future__ import annotations
 
@@ -36,7 +36,8 @@ def build_markdown(session: Session, run: TranscriptRun | None, draft: ChartDraf
     lines.append("")
     if run is not None:
         r = run.result
-        lines.append("## 전사문 (시각은 원본 녹음 기준)")
+        basis = "무음을 줄인 녹음" if session.audio_trimmed else "원본 녹음"
+        lines.append(f"## 전사문 (시각은 {basis} 기준)")
         lines.append("")
         if not r.segments:
             lines.append("(전사된 발화 없음)")

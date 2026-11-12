@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -34,7 +35,7 @@ import numpy as np
 
 from clinic_scribe import procutil
 from clinic_scribe.audio import WHISPER_SR, duration_s, write_wav
-from clinic_scribe.config import VadParams
+from clinic_scribe.config import VadParams, exe_name, native_path, setup_command
 
 SEGMENT_LINE = re.compile(r"Speech segment\s+\d+:\s*start\s*=\s*([\d.]+),\s*end\s*=\s*([\d.]+)")
 LOW_TOKEN_PROB = 0.5
@@ -123,13 +124,41 @@ class WhisperConfig:
 
 
 def find_vad_tool(cli: str | None) -> str | None:
-    """whisper-cli 와 같은 곳에 설치된 whisper-vad-speech-segments 를 찾는다."""
+    """whisper-cli 와 같은 곳에 설치된 whisper-vad-speech-segments(.exe) 를 찾는다."""
+    name = exe_name("whisper-vad-speech-segments")
     if cli:
         p = Path(cli)
-        for candidate in (p.with_name("whisper-vad-speech-segments"), p.resolve().with_name("whisper-vad-speech-segments")):
+        for candidate in (p.with_name(name), p.resolve().with_name(name)):
             if candidate.is_file() and os.access(candidate, os.X_OK):
                 return str(candidate)
     return shutil.which("whisper-vad-speech-segments")
+
+
+def cli_prompt(prompt: str) -> str:
+    """whisper-cli 에 넘길 힌트 프롬프트.
+
+    Windows 공식 빌드는 명령줄 인자를 시스템 코드 페이지(한국어 Windows 는 CP949)로 받는데 힌트는 UTF-8 로 읽어,
+    한글 힌트가 깨진 채 들어간다. 그래서 Windows 가 UTF-8 모드가 아니면 ASCII 낱말(영어 약명·검사명)만 넘긴다.
+    '용어. 기본 힌트.' 모양(문장 사이 마침표)은 지킨다. 딕션 사전의 교정은 전사 뒤에 하므로 그대로 적용된다.
+    """
+    if sys.platform != "win32" or prompt.isascii() or _windows_utf8():
+        return prompt
+    parts = []
+    for part in re.split(r"\.\s*", prompt):
+        words = [w.strip() for w in part.split(",") if w.strip() and w.strip().isascii()]
+        if words:
+            parts.append(", ".join(words))
+    return ". ".join(parts) + "." if parts else ""
+
+
+def _windows_utf8() -> bool:
+    """Windows '세계 언어 지원을 위해 Unicode UTF-8 사용' 이 켜져 있으면 명령줄 인자도 UTF-8 이다."""
+    try:
+        import ctypes
+
+        return ctypes.windll.kernel32.GetACP() == 65001
+    except (AttributeError, OSError):
+        return False
 
 
 def vad_args(params: VadParams) -> list[str]:
@@ -316,7 +345,7 @@ class WhisperRunner:
     def problems(self, need_vad: bool) -> list[str]:
         issues = []
         if not self.config.cli:
-            issues.append("whisper-cli 를 찾지 못했습니다. ./scripts/setup_macos.sh 를 실행하거나 설정에서 경로를 지정하세요.")
+            issues.append(f"whisper-cli 를 찾지 못했습니다. {setup_command()} 를 실행하거나 설정에서 경로를 지정하세요.")
         if not self.config.model.is_file():
             issues.append(f"Whisper 모델이 없습니다: {self.config.model}")
         if need_vad and not (self.config.vad_model and self.config.vad_model.is_file()):
@@ -327,7 +356,7 @@ class WhisperRunner:
         return bool(self.vad_tool and self.config.vad_model and self.config.vad_model.is_file())
 
     def detect_regions(self, wav: Path, params: VadParams, cancel: threading.Event | None = None) -> list[SpeechRegion]:
-        cmd = [self.vad_tool, "-f", str(wav), "-vm", str(self.config.vad_model), *vad_args(params), "-np"]
+        cmd = [self.vad_tool, "-f", native_path(wav), "-vm", native_path(self.config.vad_model), *vad_args(params), "-np"]
         result = procutil.run(cmd, cancel=cancel, timeout=600)
         if result.returncode != 0:
             raise WhisperError(f"음성 구간 탐지 실패 (종료 코드 {result.returncode}):\n{procutil.tail(result.stderr)}")
@@ -383,18 +412,18 @@ class WhisperRunner:
     ) -> list[TranscriptSegment]:
         cfg = self.config
         cmd = [
-            cfg.cli, "-m", str(cfg.model), "-f", str(wav),
+            cfg.cli, "-m", native_path(cfg.model), "-f", native_path(wav),
             "-l", cfg.language or "ko",
             "-t", str(cfg.threads or default_threads()),
-            "-oj", "-ojf", "-of", str(out_base),
+            "-oj", "-ojf", "-of", native_path(out_base),
         ]
         if word_level:
             cmd += ["-ml", "1", "-sow"]  # 단어마다 한 구간 (원본 녹음 시각). 받아 적는 글자는 같다
-        hint = (cfg.prompt if prompt is None else prompt).strip()
+        hint = cli_prompt((cfg.prompt if prompt is None else prompt).strip())
         if hint:
             cmd += ["--prompt", hint]
         if use_vad:
-            cmd += ["--vad", "-vm", str(cfg.vad_model), *vad_args(params)]
+            cmd += ["--vad", "-vm", native_path(cfg.vad_model), *vad_args(params)]
         result = procutil.run(cmd, capture_stdout=False, cancel=cancel)
         if result.returncode != 0:
             raise WhisperError(f"whisper-cli 실패 (종료 코드 {result.returncode}):\n{procutil.tail(result.stderr)}")

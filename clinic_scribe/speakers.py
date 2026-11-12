@@ -1,7 +1,7 @@
-"""말한 사람 알아보기 (이 Mac 에서 처리).
+"""말한 사람 알아보기 (이 컴퓨터 에서 처리).
 
 등록한 의사 목소리의 특징값(임베딩)과 발화마다의 특징값을 비교해, 가까우면 그 의사 이름을, 아니면 '환자'를 붙인다.
-목소리 특징값은 생체인식정보다. 본인 동의를 받은 의사만 등록하고, 이 Mac 의 설정 폴더(voices.json)에만 저장한다.
+목소리 특징값은 생체인식정보다. 본인 동의를 받은 의사만 등록하고, 이 컴퓨터의 설정 폴더(voices.json)에만 저장한다.
 환자 목소리는 비교에만 쓰고 저장하지 않는다.
 """
 
@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
+from clinic_scribe.config import native_path, setup_command
 from clinic_scribe.whisper import TranscriptSegment
 
 PATIENT = "환자"  # 등록되지 않은 목소리 (대개 환자이고 보호자일 수도 있다)
@@ -35,6 +36,7 @@ class Voice:
     embedding: list[float]  # 정규화한 평균 특징값
     seconds: float  # 등록에 쓴 말소리 길이
     created_at: str
+    specialty: str = ""  # 진료과 (따라 읽기 문장을 고를 때 쓴다)
 
 
 def _normalize(vector) -> np.ndarray:
@@ -86,17 +88,31 @@ class VoiceBook:
     def names(self) -> list[str]:
         return [v.name for v in self.voices]
 
-    def enroll(self, name: str, embeddings: list[np.ndarray], seconds: float) -> Voice:
+    def specialty(self, name: str) -> str:
+        """등록한 의사의 진료과 (모르면 빈 글)."""
+        return next((v.specialty for v in self.voices if v.name == name), "")
+
+    def enroll(self, name: str, embeddings: list[np.ndarray], seconds: float, specialty: str = "") -> Voice:
         if not embeddings:
             raise SpeakerError("등록할 말소리가 없습니다.")
         name = clean_name(name)
         mean = _normalize(np.mean([_normalize(e) for e in embeddings], axis=0))
-        voice = Voice(name, [round(float(x), 6) for x in mean], round(seconds, 1), datetime.now().strftime("%Y-%m-%d %H:%M"))
+        voice = Voice(name, [round(float(x), 6) for x in mean], round(seconds, 1), datetime.now().strftime("%Y-%m-%d %H:%M"),
+                      specialty)
         self.voices = [v for v in self.voices if v.name != name] + [voice]  # 같은 이름은 다시 등록
         return voice
 
     def remove(self, name: str) -> None:
         self.voices = [v for v in self.voices if v.name != name]
+
+    def rename(self, old: str, new: str) -> str:
+        """등록한 이름을 바꾼다 (목소리 특징값은 그대로). 바꾼 이름을 돌려준다."""
+        new = clean_name(new)
+        if new != old and new in self.names():
+            raise SpeakerError(f"'{new}' 목소리가 이미 있습니다. 다른 이름을 쓰거나 그 목소리를 먼저 삭제하세요.")
+        # 사본(작업 스레드가 쓰는 중일 수 있음)과 Voice 를 나눠 쓰므로 고치지 않고 바꿔 끼운다
+        self.voices = [replace(v, name=new) if v.name == old else v for v in self.voices]
+        return new
 
     def identify(self, embedding, threshold: float) -> tuple[str | None, float]:
         """가장 가까운 등록 목소리의 이름과 유사도. 유사도가 threshold 미만이면 이름 대신 None."""
@@ -114,11 +130,11 @@ class SpeakerEncoder:
         try:
             import sherpa_onnx
         except ImportError as exc:
-            raise SpeakerError("sherpa-onnx 가 설치되지 않았습니다. ./scripts/setup_macos.sh 를 다시 실행하세요.") from exc
+            raise SpeakerError(f"sherpa-onnx 가 설치되지 않았습니다. {setup_command()} 를 다시 실행하세요.") from exc
         if not model_path.is_file():
-            raise SpeakerError(f"화자 인식 모델이 없습니다: {model_path}\n./scripts/setup_macos.sh 를 다시 실행하세요.")
-        config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
-            model=str(model_path), num_threads=num_threads, debug=False, provider="cpu"
+            raise SpeakerError(f"화자 인식 모델이 없습니다: {model_path}\n{setup_command()} 를 다시 실행하세요.")
+        config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(  # Windows 한글 경로는 짧은 경로로
+            model=native_path(model_path), num_threads=num_threads, debug=False, provider="cpu"
         )
         if not config.validate():
             raise SpeakerError(f"화자 인식 모델을 쓸 수 없습니다: {model_path}")

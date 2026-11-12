@@ -1,6 +1,7 @@
-"""마이크 녹음 (sounddevice / PortAudio, macOS CoreAudio).
+"""마이크 녹음 (sounddevice / PortAudio: macOS Core Audio, Windows MME, Linux ALSA).
 
-장치가 지원하는 샘플레이트로 float32 녹음한다. 16 kHz 변환은 전사 직전에 한다.
+내장·USB·블루투스·오디오 인터페이스 등 어떤 입력 장치든 그 장치가 지원하는 샘플레이트·채널(최대 2)로 float32 녹음하고,
+16 kHz mono 변환은 전사 직전에 한다. 장치는 이름으로 기억하므로 다른 컴퓨터에서 같은 이름이 없으면 시스템 기본 입력을 쓴다.
 오디오 콜백은 블록을 큐에 넣기만 하고, 누적·레벨 계산은 UI 타이머가 한다.
 데모 입력 장치는 오디오 파일을 마이크처럼 실시간 속도로 흘려 보낸다(마이크 없이 대시보드 테스트).
 """
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import bisect
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -95,6 +97,12 @@ class FileInputStream:
         pass
 
 
+# ALSA 가 입력 장치처럼 내보이지만 사람이 고를 일이 없는 가상 장치. 'default'·'pulse'·'pipewire' 와 실제 하드웨어만 남긴다.
+_ALSA_HIDDEN = {"sysdefault", "dsnoop", "dmix", "lavrate", "samplerate", "speexrate", "upmix", "vdownmix", "jack",
+                "oss", "null", "pcm"}
+_MME_NAME_LIMIT = 30  # Windows MME 는 장치 이름을 31자로 자른다 (끝 공백이 빠지면 30자)
+
+
 def list_input_devices(refresh: bool = False) -> list[InputDevice]:
     """입력 채널이 있는 장치 목록. refresh=True 면 새로 연결된 장치까지 다시 읽는다(녹음 중에는 금지)."""
     try:
@@ -103,22 +111,48 @@ def list_input_devices(refresh: bool = False) -> list[InputDevice]:
             sd._terminate()
             sd._initialize()
         devices = sd.query_devices()
+        hostapis = sd.query_hostapis()
     except Exception as exc:
         raise RecorderError(f"오디오 장치를 조회하지 못했습니다: {exc}") from exc
-    default_index = _default_input_index()
+    return select_input_devices(list(devices), list(hostapis), _default_input_index(), _default_hostapi())
+
+
+def select_input_devices(devices: list, hostapis: list, default_index: int, default_api: int | None,
+                         platform: str | None = None) -> list[InputDevice]:
+    """PortAudio 장치 정보 → 고를 수 있는 입력 장치.
+
+    Windows 는 같은 마이크가 오디오 방식(MME·DirectSound·WASAPI·WDM-KS)마다 겹쳐 나오므로 기본 방식(MME, 어떤 샘플레이트든
+    Windows 가 변환해 주어 가장 잘 열린다) 것만 보여 주고, MME 가 31자로 자른 이름은 WASAPI 의 전체 이름으로 바꾼다.
+    Linux 는 ALSA 가상 장치(sysdefault, dsnoop 등)를 뺀다. 시스템 기본 입력 장치는 언제나 남긴다.
+    """
+    platform = platform or sys.platform
+    wasapi = [i for i, api in enumerate(hostapis) if "WASAPI" in str(api.get("name", ""))]
+    full_names = [str(d["name"]) for d in devices
+                  if d.get("hostapi") in wasapi and int(d["max_input_channels"]) > 0] if platform == "win32" else []
     result = []
     for index, info in enumerate(devices):
-        if int(info["max_input_channels"]) > 0:
-            result.append(
-                InputDevice(
-                    index=index,
-                    name=str(info["name"]),
-                    channels=int(info["max_input_channels"]),
-                    default_samplerate=int(info["default_samplerate"]),
-                    is_default=index == default_index,
-                )
-            )
+        if int(info["max_input_channels"]) <= 0:
+            continue
+        name = str(info["name"])
+        default = index == default_index
+        if default_api is not None and info.get("hostapi", default_api) != default_api and not default:
+            continue
+        if platform.startswith("linux") and name.split(":")[0].strip().lower() in _ALSA_HIDDEN and not default:
+            continue
+        if len(name) >= _MME_NAME_LIMIT:
+            longer = [full for full in full_names if full.startswith(name)]
+            if len(longer) == 1:
+                name = longer[0]
+        result.append(InputDevice(index=index, name=name, channels=int(info["max_input_channels"]),
+                                  default_samplerate=int(info["default_samplerate"]), is_default=default))
     return result
+
+
+def _default_hostapi() -> int | None:
+    try:
+        return int(sd.default.hostapi)
+    except Exception:
+        return None
 
 
 def _default_input_index() -> int:

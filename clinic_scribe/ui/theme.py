@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont, QPalette
 
 ASSETS = Path(__file__).with_name("assets")
 ACCENT = "#6366f1"
@@ -48,6 +48,12 @@ QPushButton:disabled { background: #161a22; color: #4b5263; border-color: #20242
 QPushButton#ghost { background: transparent; border: 1px solid transparent; color: #a3aab8; padding: 6px 10px; }
 QPushButton#ghost:hover { background: #1b1f29; color: #e6e8ee; }
 QPushButton#ghost:disabled { background: transparent; color: #464c5b; }
+QPushButton#danger { background: transparent; border: 1px solid transparent; color: #f87171; padding: 6px 10px; }
+QPushButton#danger:hover { background: #2a1517; border-color: #4c2228; color: #fca5a5; }
+QPushButton#danger:disabled { background: transparent; color: #464c5b; }
+QRadioButton { color: #cbd2dc; spacing: 8px; }
+QRadioButton:checked { color: #f1f3f7; font-weight: 600; }
+QRadioButton:disabled { color: #4b5263; }
 QPushButton#tab { background: transparent; border: 1px solid transparent; color: #8b93a1; padding: 6px 12px; }
 QPushButton#tab:hover { color: #e6e8ee; }
 QPushButton#tab:checked { background: #232838; color: #f1f3f7; border-color: #2f3546; }
@@ -94,6 +100,9 @@ QTableCornerButton::section { background: #13161d; border: none; }
 QTextBrowser { background: transparent; border: none; font-size: 14px; color: #e6e8ee;
                selection-background-color: #3b3f75; }
 QListWidget { background: transparent; border: none; outline: 0; }
+QListWidget::item { padding: 6px 8px; border-radius: 7px; color: #dfe3ea; }
+QListWidget::item:hover { background: #1a1e28; }
+QListWidget::item:selected { background: #232838; color: #f1f3f7; }
 QSplitter::handle { background: transparent; }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
 QScrollBar::handle:vertical { background: #2c323e; border-radius: 3px; min-height: 32px; }
@@ -150,3 +159,34 @@ def timer_font(pixel_size: int) -> QFont:
     except (AttributeError, TypeError):
         pass
     return font
+
+
+def dark_palette() -> QPalette:
+    """Windows·Linux 용 어두운 팔레트 (Fusion 스타일과 함께). OS 테마와 관계없이 macOS 와 같은 색으로 맞춘다."""
+    palette = QPalette()
+    colors = {
+        QPalette.ColorRole.Window: "#0f1117",
+        QPalette.ColorRole.WindowText: "#e6e8ee",
+        QPalette.ColorRole.Base: "#12151c",
+        QPalette.ColorRole.AlternateBase: "#161a22",
+        QPalette.ColorRole.ToolTipBase: "#1b1f29",
+        QPalette.ColorRole.ToolTipText: "#e6e8ee",
+        QPalette.ColorRole.PlaceholderText: "#6f7787",
+        QPalette.ColorRole.Text: "#e6e8ee",
+        QPalette.ColorRole.Button: "#1b1f29",
+        QPalette.ColorRole.ButtonText: "#dfe3ea",
+        QPalette.ColorRole.BrightText: "#ffffff",
+        QPalette.ColorRole.Highlight: ACCENT,
+        QPalette.ColorRole.HighlightedText: "#ffffff",
+        QPalette.ColorRole.Link: "#a5b4fc",
+        QPalette.ColorRole.Light: "#2a303c",
+        QPalette.ColorRole.Midlight: "#232834",
+        QPalette.ColorRole.Mid: "#1b1f29",
+        QPalette.ColorRole.Dark: "#0b0d12",
+        QPalette.ColorRole.Shadow: "#000000",
+    }
+    for role, color in colors.items():
+        palette.setColor(role, QColor(color))
+    for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText):
+        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor("#4b5263"))
+    return palette

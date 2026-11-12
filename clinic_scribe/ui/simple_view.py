@@ -1,7 +1,8 @@
 """간단 화면 (기본). 어두운 테마, 두 칸 구성.
 
 왼쪽 칸: 원형 녹음 버튼, 경과 시간, 입력 막대, 상태. 오른쪽 칸: 진료 기록 · 요약 · 대화 내용 탭.
-대화 내용과 요약은 숨겨 두고 탭을 눌러야 보인다(기본은 진료 기록 탭).
+대화 내용과 요약은 숨겨 두고 탭을 눌러야 보인다(기본은 진료 기록 탭). 진료 기록은 날짜별로 묶어 보여 주고,
+고른 기록은 '삭제' 버튼이나 오른쪽 클릭으로 지운다.
 스페이스바로 녹음을 시작·종료한다(키 처리는 MainWindow 가 한다). 이 화면의 버튼은 키보드 포커스를 받지 않아
 스페이스바가 항상 녹음 토글로만 동작한다.
 """
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from datetime import date
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QStyle,
     QStyledItemDelegate,
@@ -55,6 +58,7 @@ class HistoryRow:
     status: str  # 예: "요약 준비됨"
     kind: str  # 상태 색 (STATUS_COLORS 의 키)
     note: str = ""  # 나눈 이유 등
+    day: str = ""  # 날짜 묶음 제목 (예: "오늘 · 11월 12일 (목)"). 바뀌는 곳마다 제목 줄이 들어간다
 
     @property
     def text(self) -> str:
@@ -62,6 +66,16 @@ class HistoryRow:
 
 
 _ROW_ROLE = Qt.ItemDataRole.UserRole + 1
+_WEEKDAYS = "월화수목금토일"
+
+
+def day_label(day: date, today: date) -> str:
+    """진료 기록의 날짜 묶음 제목: 오늘 · 11월 12일 (목) / 어제 · … / 11월 3일 (월) / 2025년 12월 30일 (화)."""
+    text = f"{day.month}월 {day.day}일 ({_WEEKDAYS[day.weekday()]})"
+    if day.year != today.year:
+        text = f"{day.year}년 {text}"
+    gap = (today - day).days
+    return {0: f"오늘 · {text}", 1: f"어제 · {text}"}.get(gap, text)
 
 
 def _font(pixel_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
@@ -207,15 +221,25 @@ class DeviceCombo(QComboBox):
 
 
 class _HistoryDelegate(QStyledItemDelegate):
-    """진료 기록 한 줄: 번호 배지 · 시간 · 나눈 이유 · 상태 칩."""
+    """진료 기록 한 줄: 번호 배지 · 시간 · 나눈 이유 · 상태 칩. 날짜가 바뀌는 곳에는 날짜 제목 줄."""
 
     ROW_HEIGHT = 56
+    HEADER_HEIGHT = 30
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
-        return QSize(max(200, option.rect.width()), self.ROW_HEIGHT)
+        header = isinstance(index.data(_ROW_ROLE), str)
+        return QSize(max(200, option.rect.width()), self.HEADER_HEIGHT if header else self.ROW_HEIGHT)
 
     def paint(self, painter: QPainter, option, index) -> None:
         row = index.data(_ROW_ROLE)
+        if isinstance(row, str):  # 날짜 제목
+            painter.save()
+            painter.setFont(_font(12, QFont.Weight.DemiBold))
+            painter.setPen(QColor("#8b93a1"))
+            text_rect = QRectF(option.rect).adjusted(12, 8, -12, 0)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, row)
+            painter.restore()
+            return
         if not isinstance(row, HistoryRow):
             super().paint(painter, option, index)
             return
@@ -229,10 +253,12 @@ class _HistoryDelegate(QStyledItemDelegate):
             painter.setBrush(QColor("#1f2338" if selected else "#1a1e28"))
             painter.drawRoundedRect(rect, 10, 10)
 
-        badge = QRectF(rect.left() + 10, rect.center().y() - 15, 30, 30)
+        badge_font = _font(13, QFont.Weight.Bold)
+        badge_width = max(30, QFontMetrics(badge_font).horizontalAdvance(str(row.session_id)) + 14)
+        badge = QRectF(rect.left() + 10, rect.center().y() - 15, badge_width, 30)
         painter.setBrush(QColor(ACCENT if selected else "#1e2140"))
         painter.drawRoundedRect(badge, 8, 8)
-        painter.setFont(_font(13, QFont.Weight.Bold))
+        painter.setFont(badge_font)
         painter.setPen(QColor("#ffffff" if selected else "#a5b4fc"))
         painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, str(row.session_id))
 
@@ -274,12 +300,14 @@ class SimpleView(QWidget):
     voices_clicked = Signal()
     developer_clicked = Signal()
     history_selected = Signal(int)  # 진료 번호
+    delete_requested = Signal(int)  # 지울 진료 번호 (-1: 지금 고른 진료)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(stylesheet("SimpleView", _EXTRA))
         self._panel = "history"
+        self._history_rows: tuple[HistoryRow, ...] | None = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -301,7 +329,7 @@ class SimpleView(QWidget):
         body.addWidget(self._build_panel(), 1)
         outer.addLayout(body, 1)
 
-        self.note = QLabel("녹음·전사는 이 Mac 에서 처리합니다 · 요약을 만들 때 전사문이 Claude 서비스로 전송됩니다")
+        self.note = QLabel("녹음·전사·진료 기록은 이 컴퓨터 에만 · 요약을 만들 때 전사문이 Claude 서비스로 전송됩니다")
         self.note.setObjectName("footnote")
         self.note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.note.setContentsMargins(0, 0, 0, 10)
@@ -440,6 +468,12 @@ class SimpleView(QWidget):
             self._tabs.addButton(button)
             header.addWidget(button)
         header.addStretch(1)
+        self.delete_btn = QPushButton("삭제")
+        self.delete_btn.setObjectName("danger")
+        self.delete_btn.setToolTip("고른 진료 기록(녹음·전사문·요약)을 이 컴퓨터 에서 지웁니다")
+        self.delete_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.delete_btn.clicked.connect(lambda: self.delete_requested.emit(-1))
+        header.addWidget(self.delete_btn)
         self.copy_btn = QPushButton("요약 복사")
         self.copy_btn.setObjectName("primary")
         self.copy_btn.setToolTip("요약을 클립보드에 복사합니다 (차트에 옮겨 적을 때).")
@@ -452,15 +486,16 @@ class SimpleView(QWidget):
         divider.setFixedHeight(1)
         column.addWidget(divider)
 
-        # 진료 기록: 내용은 숨기고 번호·시간·상태만 보여 준다.
+        # 진료 기록: 내용은 숨기고 번호·시간·상태만 보여 준다. 날짜가 바뀌는 곳에 날짜 제목 줄.
         self.history = QListWidget()
         self.history.setItemDelegate(_HistoryDelegate(self.history))
         self.history.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.history.setMouseTracking(True)
         self.history.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self.history.setUniformItemSizes(True)
         self.history.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.history.itemClicked.connect(lambda item: self.history_selected.emit(int(item.data(Qt.ItemDataRole.UserRole))))
+        self.history.itemClicked.connect(self._on_history_clicked)
+        self.history.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.history.customContextMenuRequested.connect(self._history_menu)
         column.addWidget(self.history, 1)
         self.empty = QLabel("아직 진료 기록이 없습니다\nSpace 를 눌러 녹음을 시작하면 진료가 여기에 쌓입니다")
         self.empty.setObjectName("empty")
@@ -497,26 +532,63 @@ class SimpleView(QWidget):
         self.error.show()
 
     def set_history(self, rows: list[HistoryRow], selected_id: int | None) -> None:
-        """rows: 최신순."""
+        """rows: 최신순. 바뀐 것이 없으면 목록을 다시 만들지 않고 고른 줄만 맞춘다 (기록이 많아도 가볍게)."""
         self.history.blockSignals(True)
-        self.history.clear()
-        for row in rows:
-            item = QListWidgetItem(row.text)
-            item.setData(Qt.ItemDataRole.UserRole, row.session_id)
-            item.setData(_ROW_ROLE, row)
-            self.history.addItem(item)
-            if row.session_id == selected_id:
-                item.setSelected(True)
-                self.history.setCurrentItem(item)
+        if tuple(rows) != self._history_rows:
+            self._history_rows = tuple(rows)
+            self.history.clear()
+            day = None
+            for row in rows:
+                if row.day and row.day != day:
+                    day = row.day
+                    header = QListWidgetItem(day)
+                    header.setData(_ROW_ROLE, day)
+                    header.setFlags(Qt.ItemFlag.NoItemFlags)
+                    self.history.addItem(header)
+                item = QListWidgetItem(row.text)
+                item.setData(Qt.ItemDataRole.UserRole, row.session_id)
+                item.setData(_ROW_ROLE, row)
+                self.history.addItem(item)
+        current = None
+        for item in self.history_items():
+            chosen = item.data(Qt.ItemDataRole.UserRole) == selected_id
+            item.setSelected(chosen)
+            if chosen:
+                current = item
+        if current is not None:
+            self.history.setCurrentItem(current)
+        else:
+            self.history.setCurrentRow(-1)
         self.history.blockSignals(False)
         self.history_tab.setText(f"진료 기록  {len(rows)}" if rows else "진료 기록")
         self._show(self._panel)
 
+    def history_items(self) -> list[QListWidgetItem]:
+        """진료 기록 줄 (날짜 제목 줄은 빼고, 최신순)."""
+        items = (self.history.item(i) for i in range(self.history.count()))
+        return [item for item in items if item.data(Qt.ItemDataRole.UserRole) is not None]
+
+    def _on_history_clicked(self, item: QListWidgetItem) -> None:
+        session_id = item.data(Qt.ItemDataRole.UserRole)
+        if session_id is not None:
+            self.history_selected.emit(int(session_id))
+
+    def _history_menu(self, pos) -> None:
+        item = self.history.itemAt(pos)
+        session_id = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if session_id is None:
+            return
+        menu = QMenu(self.history)
+        menu.addAction(f"진료 #{session_id} 기록 삭제…").triggered.connect(lambda: self.delete_requested.emit(int(session_id)))
+        menu.exec(self.history.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
     # ---- 결과 (기본 숨김: 진료 기록 탭) ------------------------------------------
-    def set_results(self, has_transcript: bool, has_summary: bool, can_copy: bool) -> None:
+    def set_results(self, has_transcript: bool, has_summary: bool, can_copy: bool, can_delete: bool = False) -> None:
         self.show_transcript_btn.setEnabled(has_transcript)
         self.show_summary_btn.setEnabled(has_summary)
         self.copy_btn.setEnabled(can_copy)
+        self.delete_btn.setEnabled(can_delete)
         if (self._panel == "summary" and not has_summary) or (self._panel == "transcript" and not has_transcript):
             self.history_tab.setChecked(True)
 

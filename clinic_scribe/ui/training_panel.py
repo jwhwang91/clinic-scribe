@@ -1,6 +1,6 @@
 """따라 읽기 학습 화면 ('의사 목소리' 창 안): 문장을 하나씩 보여 주고 읽으면 다음 문장으로 넘어간다.
 
-다 읽으면 이 Mac 에서 분석해 목소리 등록과 딕션 사전(교정·용어)을 만들고, 의사가 고른 것만 저장한다.
+다 읽으면 이 컴퓨터 에서 분석해 목소리 등록과 딕션 사전(교정·용어)을 만들고, 의사가 고른 것만 저장한다.
 녹음은 분석이 끝나면 버린다.
 """
 
@@ -53,6 +53,7 @@ class TrainingPanel(QWidget):
         self._tasks.finished.connect(self._on_analyzed)
         self._name = ""
         self._prompts: list[str] = []
+        self._specialty = ""  # 따라 읽는 문장의 진료과 (목소리와 함께 저장)
         self._marks: list[float] = []
         self._index = 0
         self._heard = False
@@ -106,7 +107,7 @@ class TrainingPanel(QWidget):
         busy = QWidget()
         bl = QVBoxLayout(busy)
         bl.addStretch(1)
-        busy_label = QLabel("분석 중…\n같은 녹음으로 목소리를 등록하고, 받아 적은 글을 읽은 문장과 비교합니다 (이 Mac).")
+        busy_label = QLabel("분석 중…\n같은 녹음으로 목소리를 등록하고, 받아 적은 글을 읽은 문장과 비교합니다 (이 컴퓨터).")
         busy_label.setObjectName("muted")
         busy_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         bl.addWidget(busy_label)
@@ -150,12 +151,13 @@ class TrainingPanel(QWidget):
         return self._name
 
     # ---- 읽기 ---------------------------------------------------------------
-    def start(self, name: str, device: InputDevice, prompts: list[str]) -> str | None:
+    def start(self, name: str, device: InputDevice, prompts: list[str], specialty: str = "") -> str | None:
         """녹음을 시작한다. 시작하지 못하면 그 이유를 돌려준다."""
         try:
             self._recorder.start(device)
         except RecorderError as exc:
             return str(exc)
+        self._specialty = specialty
         self._name, self._prompts, self._index, self._marks = name, list(prompts), 0, [0.0]
         self.result, self.error, self._heard = None, None, False
         self._monitor.reset()
@@ -165,7 +167,8 @@ class TrainingPanel(QWidget):
         return None
 
     def _show_prompt(self) -> None:
-        self.progress.setText(f"{self._index + 1} / {len(self._prompts)} · 다 읽고 잠깐 쉬면 다음 문장으로 넘어갑니다")
+        field = f"{self._specialty} 문장 · " if self._specialty else ""
+        self.progress.setText(f"{field}{self._index + 1} / {len(self._prompts)} · 다 읽고 잠깐 쉬면 다음 문장으로 넘어갑니다")
         self.prompt_label.setText(self._prompts[self._index])
         self.state.setText("평소 진료하실 때처럼 읽어 주세요")
 
@@ -267,7 +270,7 @@ class TrainingPanel(QWidget):
             return
         try:
             if result.embeddings and result.speech_seconds >= MIN_ENROLL_S:
-                self.voices.enroll(self._name, result.embeddings, result.speech_seconds)
+                self.voices.enroll(self._name, result.embeddings, result.speech_seconds, self._specialty)
                 self.voices.save()
             for row in range(self.findings.count()):
                 item = self.findings.item(row)

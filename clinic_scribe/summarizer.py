@@ -1,6 +1,6 @@
 """Claude Code CLI 로 한국어 검토용 차트 초안을 만든다.
 
-녹음·전사는 이 Mac 에서 끝나고, 요약을 요청할 때만 전사문이 Claude 서비스(Anthropic)로 전송된다.
+녹음·전사는 이 컴퓨터 에서 끝나고, 요약을 요청할 때만 전사문이 Claude 서비스(Anthropic)로 전송된다.
 
 호출 (Claude Code 2.1.311 의 --help 와 실제 호출로 확인한 형태, shell=False, 전사문은 stdin):
     claude -p --model <모델> --output-format json --no-session-persistence --tools "" --disallowedTools "mcp__*"
@@ -204,6 +204,31 @@ _LIMIT_RE = re.compile(
 _OVERLOAD_RE = re.compile(r"overloaded", re.I)
 _MODEL_RE = re.compile(r"selected model|unrecognized_model|invalid model|model.{0,40}(?:not (?:exist|found|available))", re.I)
 _NETWORK_RE = re.compile(r"ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|fetch failed|unable to connect|network", re.I)
+
+
+@dataclass
+class LocalConfig:
+    """로컬 모델 요약 설정 (모델·서버 경로는 LocalLLM 이 가진다)."""
+
+    label: str  # 화면·초안에 남길 모델 이름
+    timeout_s: int = 600
+    mode: str = "chart"
+
+
+def summarize_local(segments: list[TranscriptSegment], cfg: LocalConfig, llm, cancel: threading.Event | None = None
+                    ) -> tuple[dict, dict]:
+    """Claude 와 같은 작성 규칙·JSON 스키마로 로컬 모델에 요약을 맡긴다. 전사문은 이 컴퓨터 밖으로 나가지 않는다."""
+    from clinic_scribe.local_llm import LocalLLMError
+
+    if not any(s.text.strip() for s in segments):
+        raise SummaryError("failed", "요약할 전사문이 없습니다.")
+    system_prompt, instruction, schema = MODES[cfg.mode]
+    try:
+        structured = llm.chat_json(system_prompt, f"{instruction}\n\n{build_stdin(segments)}", schema, cfg.timeout_s, cancel)
+    except LocalLLMError as exc:
+        kind = exc.kind if exc.kind in ("cancelled", "timeout", "not_found") else "failed"
+        raise SummaryError(kind, str(exc)) from exc
+    return structured, {"engine": "local", "model": cfg.label}
 
 
 class SummaryError(Exception):

@@ -32,6 +32,7 @@ def test_completion_handler_swallows_callback_errors():
     assert mic_permission.completion_handler(broken)(False) is None
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS AVFoundation 권한 요청")
 def test_real_avfoundation_callback_does_not_abort():
     """실제 AVFoundation 호출. 권한이 이미 정해진 경우에만 실행한다(이때는 대화상자 없이 바로 답이 온다)."""
     status = mic_permission.authorization_status()
@@ -55,3 +56,51 @@ def test_real_avfoundation_callback_does_not_abort():
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr[-800:]
     assert proc.stdout.strip() == f"granted {status == 'authorized'}"
+
+
+# ioreg -r -k AppleClamshellState 실제 출력의 해당 줄 (덮개 닫힘)
+IOREG_CLOSED = '+-o IOPMrootDomain  <class IOPMrootDomain>\n    "AppleClamshellState" = Yes\n    "AppleClamshellCausesSleep" = No\n'
+
+
+def test_lid_closed_reads_clamshell_state(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")  # 맥북 덮개 확인 (다른 OS 는 늘 False)
+    def fake_run(cmd, **kwargs):
+        assert cmd[0].endswith("ioreg") and "AppleClamshellState" in cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=fake_run.out, stderr="")
+
+    monkeypatch.setattr(mic_permission.subprocess, "run", fake_run)
+    fake_run.out = IOREG_CLOSED
+    assert mic_permission.lid_closed()
+    fake_run.out = IOREG_CLOSED.replace("= Yes", "= No")
+    assert not mic_permission.lid_closed()
+    fake_run.out = ""  # 데스크톱 맥 등 덮개가 없는 경우
+    assert not mic_permission.lid_closed()
+
+    def broken(cmd, **kwargs):
+        raise OSError("ioreg 없음")
+
+    monkeypatch.setattr(mic_permission.subprocess, "run", broken)
+    assert not mic_permission.lid_closed()
+
+
+def test_lid_closed_messages(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert mic_permission.is_builtin_mic("MacBook Pro 마이크") and mic_permission.is_builtin_mic("MacBook Air Microphone")
+    assert not mic_permission.is_builtin_mic("‘iPhone (2)’ 마이크") and not mic_permission.is_builtin_mic("USB Audio")
+    assert "‘iPhone (2)’ 마이크" in mic_permission.lid_closed_message(["‘iPhone (2)’ 마이크"])
+    assert "외장 마이크" in mic_permission.lid_closed_message([])
+    monkeypatch.setattr(mic_permission, "lid_closed", lambda: True)
+    assert "덮개" in mic_permission.silent_input_message("MacBook Pro 마이크")  # 권한 문제가 아니라 덮개 문제로 안내
+    assert "권한" in mic_permission.silent_input_message("USB Audio")
+
+
+def test_app_bundle_launch_names_the_app(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("__CFBundleIdentifier", mic_permission.APP_BUNDLE_ID)  # clinic-scribe.app 으로 열었을 때
+    assert mic_permission.launched_as_app()
+    assert mic_permission.host_app_name() == "clinic-scribe"
+    message = mic_permission.denied_message("denied")
+    assert "'clinic-scribe'" in message and "다시 여세요" in message and "run.sh" not in message
+    monkeypatch.setenv("__CFBundleIdentifier", "com.apple.Terminal")
+    assert not mic_permission.launched_as_app()
+    assert "run.sh" in mic_permission.denied_message("denied")

@@ -1,8 +1,9 @@
 """진료 세션: 한 진료(녹음 구간 또는 불러온 파일)와 그 전사·요약 결과.
 
-앱이 켜져 있는 동안 진료들은 목록으로 쌓인다. 자동 진료 나누기로 다음 진료를 녹음하는 동안에도 앞 진료의
-전사·요약은 그 진료 객체에만 반영되므로 진료끼리 결과가 섞이지 않는다.
-녹음은 메모리(16 kHz mono)에만 두고, 사용자가 내보내기를 고를 때만 파일로 저장한다.
+진료들은 목록으로 쌓이고 진료 기록 저장소(records.py)에 저장되어 앱을 다시 열어도 남는다. 자동 진료 나누기로
+다음 진료를 녹음하는 동안에도 앞 진료의 전사·요약은 그 진료 객체에만 반영되므로 진료끼리 결과가 섞이지 않는다.
+녹음(16 kHz mono)은 전사가 끝나면 긴 무음을 줄인 것으로 바뀌고, 오래된 진료의 녹음은 메모리에서 놓았다가
+필요할 때 저장소에서 다시 읽는다.
 """
 
 from __future__ import annotations
@@ -53,6 +54,14 @@ class Session:
     transcribe_error: str | None = None
     transcribe_seconds: float = 0.0
     summary_seconds: float = 0.0
+    # 진료 기록 저장소 (records.py)
+    audio_trimmed: bool = False  # pcm16 과 전사 시각이 무음을 줄인 녹음 기준
+    audio_dirty: bool = False  # pcm16 이 바뀌어 녹음 파일을 다시 써야 한다
+    stored_audio: bool = False  # 저장소에 녹음 파일이 있다 (pcm16 을 놓아도 다시 읽을 수 있음)
+    loaded: bool = True  # False: 앱을 열 때 목록용 정보만 읽은 기록 (고르면 전사문·요약을 읽는다)
+    stored_status: str = ""  # 목록용 상태·의사 (loaded 가 False 일 때 쓴다)
+    stored_doctor: str | None = None
+    stored_pending: str = ""  # "transcribe" / "summary": 그 처리 도중 앱이 꺼진 기록
     _next_run: int = 1
 
     def new_run_id(self) -> int:

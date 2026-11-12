@@ -1,6 +1,7 @@
 """오프스크린 Qt 화면 테스트. 마이크는 가짜 입력 스트림으로 대신한다(권한 대화상자 없음)."""
 
 import json
+import sys
 import threading
 import time
 
@@ -80,6 +81,7 @@ def window(qapp, monkeypatch, tmp_path):
 
     monkeypatch.setattr(main_window, "list_input_devices", lambda refresh=False: [FAKE_DEVICE])
     monkeypatch.setattr(mic_permission, "authorization_status", lambda: "authorized")
+    monkeypatch.setattr(mic_permission, "lid_closed", lambda: False)  # 이 Mac 의 실제 덮개 상태와 무관하게
     monkeypatch.setattr(recorder.sd, "InputStream", FakeInputStream)
     monkeypatch.setattr(recorder.sd, "check_input_settings", lambda **kw: None)
     s = Settings()
@@ -186,6 +188,7 @@ def test_demo_warning_follows_selected_device(qapp, monkeypatch, samples):
 
     monkeypatch.setattr(main_window, "list_input_devices", lambda refresh=False: [FAKE_DEVICE])
     w = main_window.MainWindow(Settings(), demo_file=samples / "mock_consult_short.wav")
+    w.interactive = False
     try:
         assert w.device_combo.currentIndex() == 0 and not w.demo_warning.isHidden()
         w.device_combo.setCurrentIndex(1)  # 마이크로 바꾸면 경고가 사라진다
@@ -268,11 +271,21 @@ def test_no_input_device(qapp, monkeypatch):
 
 
 def test_vad_comparison_on_same_recording(window, qapp, samples):
+    from clinic_scribe.records import MAX_PAUSE_S
+    from clinic_scribe.whisper import format_time
+
     window.vad_check.setChecked(True)
     window.open_audio_file(samples / "long_pause.wav", confirm=False)
     assert wait_until(qapp, lambda: len(window.session.runs) == 1)
     assert window.regions_table.rowCount() == 2
-    assert "[00:13." in window.transcript_view.toPlainText()  # 원본 녹음 기준 시각
+    # 저장하는 녹음은 긴 무음을 줄인 것이고(원본 19.3초), 전사 시각도 그 녹음 기준이다
+    # (9초 무음 뒤 원본 13.47초에 시작한 "오늘은 경과를…" 이 앞으로 온다)
+    r = window.session.runs[-1].result
+    assert window.session.audio_trimmed and r.audio_duration < 19.3 - 5
+    assert len(window.session.pcm16) / 16000 == pytest.approx(r.audio_duration, abs=0.01)
+    assert r.regions[1].start - r.regions[0].end == pytest.approx(MAX_PAUSE_S, abs=0.02)
+    after_pause = next(seg for seg in r.segments if "경과" in seg.text)
+    assert after_pause.start < 8 and f"[{format_time(after_pause.start)}" in window.transcript_view.toPlainText()
     window.vad_check.setChecked(False)
     window.retranscribe_btn.click()
     assert wait_until(qapp, lambda: len(window.session.runs) == 2)
@@ -370,7 +383,8 @@ def test_simple_view_space_bar_and_hidden_results(qapp, monkeypatch, samples, tm
         assert wait_until(qapp, lambda: w.session.draft is not None)
         assert w.simple.transcript_view.isHidden() and w.simple.summary_view.isHidden()  # 끝나도 숨긴 채
         assert "준비됨" in w.simple.status.text()
-        assert w.simple.history.count() == 1 and "요약 준비됨" in w.simple.history.item(0).text()
+        rows = w.simple.history_items()
+        assert len(rows) == 1 and "요약 준비됨" in rows[0].text()
         w.simple.show_summary_btn.click()
         assert not w.simple.summary_view.isHidden() and "주요 내용" in w.simple.summary_view.toPlainText()
         w.simple.show_transcript_btn.click()
@@ -416,12 +430,14 @@ def test_simple_view_draws_every_state(qapp, capfd):
     view.show()
     view.set_history(
         [
-            HistoryRow(2, "10:12 ~", "녹음 중", "recording"),
-            HistoryRow(1, "10:02–10:11 · 09:05", "요약 준비됨", "done", "다음 환자 신호 '들어오세요'"),
+            HistoryRow(3, "10:12 ~", "녹음 중", "recording", day="오늘 · 11월 12일 (목)"),
+            HistoryRow(2, "10:02–10:11 · 09:05", "요약 준비됨", "done", "다음 환자 신호 '들어오세요'", "오늘 · 11월 12일 (목)"),
+            HistoryRow(1234, "17:40–17:52 · 12:01", "전사 실패", "error", day="어제 · 11월 11일 (수)"),
         ],
-        1,
+        2,
     )
-    assert view.history.item(1).text() == "진료 #1 · 10:02–10:11 · 09:05 · 요약 준비됨 · 다음 환자 신호 '들어오세요'"
+    assert view.history_items()[1].text() == "진료 #2 · 10:02–10:11 · 09:05 · 요약 준비됨 · 다음 환자 신호 '들어오세요'"
+    assert view.history.count() == 5  # 날짜 제목 줄 2개 + 기록 3줄
     for recording in (False, True):
         view.set_recording(recording, True)
         view.level.set_level(-20.0)
@@ -435,6 +451,28 @@ def test_simple_view_draws_every_state(qapp, capfd):
     assert not view.grab().isNull()
     view.close()
     assert "Traceback" not in capfd.readouterr().err  # 직접 그리는 버튼·막대·기록 줄에서 예외가 없었다
+
+
+def test_closed_lid_switches_away_from_builtin_mic(window, qapp, monkeypatch):
+    """맥북 덮개를 닫으면(클램쉘) 내장 마이크는 0 만 들어온다: 다른 입력이 있으면 그것을 고르고, 없으면 녹음 전에 알린다."""
+    from clinic_scribe.ui import main_window
+
+    builtin = recorder.InputDevice(index=3, name="MacBook Pro 마이크", channels=1, default_samplerate=48000, is_default=True)
+    iphone = recorder.InputDevice(index=0, name="‘iPhone (2)’ 마이크", channels=1, default_samplerate=48000, is_default=False)
+    monkeypatch.setattr(mic_permission, "lid_closed", lambda: True)
+    monkeypatch.setattr(main_window, "list_input_devices", lambda refresh=False: [iphone, builtin])
+    window.settings.input_device = ""
+    window._load_devices(refresh=False)
+    assert window._selected_device() == iphone
+    assert "덮개" in window.error_label.text() and "iPhone" in window.error_label.text()
+    assert window.settings.input_device == ""  # 자동으로 고른 장치는 저장하지 않는다 (덮개를 열면 다시 내장 마이크)
+
+    monkeypatch.setattr(main_window, "list_input_devices", lambda refresh=False: [builtin])
+    window._load_devices(refresh=False)
+    assert window._selected_device() == builtin
+    window.record_btn.click()
+    assert not window.recorder.active  # 무음을 녹음하지 않는다
+    assert "덮개" in window.error_label.text() and "외장 마이크" in window.error_label.text()
 
 
 def test_space_bar_through_window_toggles_once(window, qapp):
@@ -489,7 +527,7 @@ def test_auto_split_on_next_patient_cue(window, qapp, samples):
     t1, t2 = transcript_text(first), transcript_text(second)
     assert "사흘" in t1 and "목이" not in t1
     assert "목이" in t2 and "사흘" not in t2
-    assert window.simple.history.count() == 2
+    assert len(window.simple.history_items()) == 2
 
 
 def enroll_voice(window, path, name, encoder):
@@ -573,7 +611,7 @@ def test_transcript_marks_registered_doctor(window, qapp, samples, speaker_encod
         expected = None if utt["end"] - utt["start"] < 1.0 else ("김원장" if utt["role"] == "doctor" else PATIENT)
         assert line.speaker == expected, utt["text"]
     assert "김원장" in window.transcript_view.toPlainText() and "환자" in window.transcript_view.toPlainText()
-    assert "의사 김원장" in window.simple.history.item(0).text()
+    assert "의사 김원장" in window.simple.history_items()[0].text()
 
 
 def test_cue_splits_only_when_registered_doctor_says_it(window, qapp, samples, speaker_encoder, monkeypatch):
@@ -690,3 +728,250 @@ def test_recording_stops_itself_after_long_idle(window, qapp, samples):
     assert "녹음 자동 멈춤" in window.session.end_reason
     assert wait_until(qapp, lambda: window.session.runs, 60)
     assert "사흘" in transcript_text(window.session)
+
+
+def history_days(view) -> list[str]:
+    from clinic_scribe.ui.simple_view import _ROW_ROLE
+
+    items = (view.history.item(i) for i in range(view.history.count()))
+    return [item.data(_ROW_ROLE) for item in items if isinstance(item.data(_ROW_ROLE), str)]
+
+
+def test_records_survive_restart_and_can_be_deleted(window, qapp, samples):
+    """끝난 진료는 저장되어 앱을 다시 열어도 보이고(무음을 줄인 녹음 · 전사문 · 요약), 지우면 녹음까지 사라진다."""
+    from clinic_scribe.ui import main_window
+
+    window.settings.auto_summarize = True
+    window.open_audio_file(samples / "long_pause.wav", confirm=False)
+    assert wait_until(qapp, lambda: window.session.draft is not None and not window._tasks)
+    first = window.session
+    store = window.store
+    assert window.saver.flush()
+    saved = store.read_audio(first.session_id)
+    assert np.array_equal(saved, first.pcm16) and len(saved) / 16000 < 19.3 - 5  # 긴 무음을 줄인 녹음
+    assert sys.platform == "win32" or store.audio_path(first.session_id).stat().st_mode & 0o777 == 0o600
+    questions = []
+    window._confirm = lambda title, text: questions.append(text) or True
+    window.close()
+    assert not questions  # 다 저장되어 있으니 종료할 때 묻지 않는다
+
+    reopened = main_window.MainWindow(window.settings)  # 앱을 다시 연다
+    reopened.interactive = False
+    try:
+        rows = reopened.simple.history_items()
+        assert len(rows) == 1 and f"진료 #{first.session_id}" in rows[0].text() and "요약 준비됨" in rows[0].text()
+        assert history_days(reopened.simple)[0].startswith("오늘 · ")
+        assert not reopened.sessions[0].loaded  # 목록만 먼저 읽는다
+        reopened._on_history_selected(first.session_id)
+        assert "사흘" in reopened.simple.transcript_view.toPlainText()
+        assert "주호소·현병력" in reopened.simple.summary_view.toPlainText()
+        assert "무음을 줄여 저장한 녹음 기준" in reopened.transcript_view.toPlainText()
+        assert reopened.play_btn.isEnabled() and reopened.session.pcm16 is None  # 녹음은 재생할 때 읽는다
+        reopened.open_audio_file(samples / "mock_consult_short.wav", confirm=False)
+        assert reopened.session.session_id == first.session_id + 1  # 번호가 이어진다
+        assert wait_until(qapp, lambda: reopened.session.draft is not None and not reopened._tasks)
+
+        reopened._on_history_selected(first.session_id)
+        assert reopened.simple.delete_btn.isEnabled()
+        reopened.simple.delete_btn.click()  # 고른 기록 삭제 (확인 창은 자동 검증에서 건너뜀)
+        assert [s.session_id for s in reopened.sessions] == [first.session_id + 1] and reopened.session is None
+        assert not reopened.simple.delete_btn.isEnabled()
+        assert "삭제했습니다" in reopened.simple.status.text()
+        assert reopened.saver.flush()
+        assert [row.id for row in store.load_index()] == [first.session_id + 1]
+        assert not store.audio_path(first.session_id).exists()
+    finally:
+        reopened.shutdown()
+
+
+def test_closing_during_transcription_keeps_audio_for_retry(window, qapp, samples):
+    """전사 도중 앱을 닫아도 녹음은 남고, 다음에 열면 '전사 다시 시도'로 이어서 전사한다."""
+    from clinic_scribe.ui import main_window
+
+    window.open_audio_file(samples / "mock_consult_short.wav", confirm=False)
+    session = window.session
+    assert wait_until(qapp, lambda: session.stored_audio, 30)  # 받은 녹음을 전사보다 먼저 저장한다
+    questions = []
+    window._confirm = lambda title, text: questions.append(text) or True
+    window.close()
+    assert "전사·요약 중인 진료가 1건" in questions[-1]
+
+    reopened = main_window.MainWindow(window.settings)
+    reopened.interactive = False
+    try:
+        assert "전사 실패" in reopened.simple.history_items()[0].text()
+        reopened._on_history_selected(session.session_id)
+        assert "앱이 종료되었습니다" in reopened.simple.error.text()
+        assert reopened.simple.retry_btn.text() == "전사 다시 시도" and not reopened.simple.retry_btn.isHidden()
+        reopened.simple.retry_btn.click()
+        assert wait_until(qapp, lambda: reopened.session.runs and not reopened._tasks)
+        assert "사흘전부터" in transcript_text(reopened.session).replace(" ", "")
+        assert reopened.session.audio_trimmed and reopened.simple.retry_btn.isHidden()
+        assert reopened.saver.flush()
+        assert reopened.store.load_index()[0].status == "전사 완료"
+    finally:
+        reopened.shutdown()
+
+
+def test_recording_session_cannot_be_deleted(window, qapp):
+    FakeInputStream.source = np.zeros(48000 * 5, np.float32) + 1e-3
+    window.record_btn.click()
+    assert window.recorder.active and not window.simple.delete_btn.isEnabled()
+    window._on_delete_requested(window.session.session_id)
+    assert window.recorder.active and len(window.sessions) == 1 and "지울 수 없습니다" in window.simple.error.text()
+
+
+def test_day_labels():
+    from datetime import date
+
+    from clinic_scribe.ui.simple_view import day_label
+
+    today = date(2026, 11, 12)
+    assert day_label(today, today) == "오늘 · 11월 12일 (목)"
+    assert day_label(date(2026, 11, 11), today) == "어제 · 11월 11일 (수)"
+    assert day_label(date(2026, 11, 3), today) == "11월 3일 (화)"
+    assert day_label(date(2025, 12, 30), today) == "2025년 12월 30일 (화)"
+
+
+def test_last_korean_syllable_is_committed_before_a_click(window, qapp, monkeypatch):
+    """한글 마지막 글자가 조합 중일 때 포커스를 받지 않는 단추·체크박스를 누르면 먼저 확정한다 ('황재웅' 이 '황재' 로 저장되던 문제)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QInputMethodEvent
+    from PySide6.QtTest import QTest
+
+    from clinic_scribe.ui import widgets
+    from clinic_scribe.ui.voice_dialog import VoiceDialog
+
+    dialog = VoiceDialog(window.voices, window._speaker_encoder, None, window)
+    dialog.interactive = False
+    dialog.show()
+    edit = dialog.name_edit
+    edit.setText("황재")
+    qapp.sendEvent(edit, QInputMethodEvent("웅", []))  # 마지막 글자 '웅' 이 아직 조합 중
+    assert edit.text() == "황재"
+
+    class MacLikeInputMethod:
+        """macOS 입력기처럼 commit 하면 조합 중인 글자를 입력란에 넣는다 (조합 중인 것이 없으면 아무 일도 없음)."""
+
+        composing, calls = "웅", []
+
+        def commit(self):
+            self.calls.append("commit")
+            if self.composing:
+                done = QInputMethodEvent("", [])
+                done.setCommitString(self.composing)
+                qapp.sendEvent(edit, done)
+                self.composing = ""
+
+        def reset(self):
+            self.calls.append("reset")
+
+    ime = MacLikeInputMethod()
+    monkeypatch.setattr(widgets.QApplication, "focusWidget", staticmethod(lambda: edit))
+    monkeypatch.setattr(widgets.QGuiApplication, "inputMethod", staticmethod(lambda: ime))
+    QTest.mouseClick(edit, Qt.MouseButton.LeftButton)  # 입력란 안을 누르면(커서 옮기기) 그대로 둔다
+    assert ime.calls == [] and edit.text() == "황재"
+    QTest.mouseClick(dialog.consent, Qt.MouseButton.LeftButton)  # 입력란 밖을 누르면 누르기 직전에 확정
+    assert ime.calls[0] == "commit" and edit.text() == "황재웅" and dialog.consent.isChecked()
+    assert dialog._checked_name() == "황재웅"
+    dialog.reject()
+
+
+def test_renaming_doctor_updates_voice_diction_and_records(window, qapp):
+    from clinic_scribe.config import VadParams
+    from clinic_scribe.diction import DictionBook
+    from clinic_scribe.session import TranscriptRun
+    from clinic_scribe.speakers import VoiceBook
+    from clinic_scribe.ui.voice_dialog import VoiceDialog
+    from clinic_scribe.whisper import TranscriptionResult, TranscriptSegment
+
+    window.voices.enroll("황재", [np.ones(192, np.float32)], 30.0)
+    window.voices.save()
+    window.diction.add_correction("황재", "트림에 부티는", "트리메부틴은")
+    window.diction.save()
+    session = window._create_session("파일 · 진료.wav")
+    lines = [TranscriptSegment(0.0, 1.5, "어디가 불편하세요?", speaker="황재"), TranscriptSegment(2.0, 3.0, "배가요.", speaker="환자")]
+    session.runs.append(TranscriptRun(session.new_run_id(), TranscriptionResult(lines, [], True, VadParams(), 3.0, 0.5, doctor="황재")))
+    window._persist(session)
+    assert window.saver.flush()
+
+    dialog = VoiceDialog(window.voices, window._speaker_encoder, None, window, diction=window.diction)
+    dialog.interactive = False
+    dialog.list.setCurrentRow(0)
+    assert dialog.rename_btn.isEnabled() and dialog.rename("황재", "황재웅")
+    assert dialog.renamed == [("황재", "황재웅")] and "황재웅" in dialog.list.item(0).text()
+    assert not dialog.rename("황재웅", "환자")  # '환자' 는 쓸 수 없는 이름
+    dialog.reject()
+    window._rename_doctor("황재", "황재웅")  # 창을 닫은 뒤 메인 창이 하는 일
+
+    assert VoiceBook.load(window.voices.path).names() == ["황재웅"]  # 목소리 특징값은 그대로, 이름만
+    saved = DictionBook.load(window.diction.path)
+    assert saved.doctors() == ["황재웅"] and saved.entry("황재웅").corrections[0].right == "트리메부틴은"
+    assert [seg.speaker for seg in session.runs[0].result.segments] == ["황재웅", "환자"]
+    assert window.saver.flush()
+    row = window.store.load_index()[-1]
+    assert row.doctor == "황재웅" and '"speaker": "황재웅"' in json.dumps(window.store.load_data(row.id), ensure_ascii=False)
+
+
+def test_local_model_summary_never_leaves_this_computer(window, qapp, samples, tmp_path, monkeypatch):
+    """요약 방식을 로컬 모델로 고르면 전사문을 Claude 로 보내지 않고 이 컴퓨터의 모델(가짜 llama-server)이 요약한다."""
+    from clinic_scribe import installer
+    from tests.helpers import make_fake_llama_server
+
+    claude_called = tmp_path / "claude-called.json"
+    window.settings.claude_cli = make_fake_cli(tmp_path, "success", claude_called)
+    window.settings.summary_engine, window.settings.local_model = "local", "qwen3-8b"
+    server = make_fake_llama_server(tmp_path)
+    model_file = tmp_path / "Qwen3-8B-Q4_K_M.gguf"
+    model_file.write_bytes(b"GGUF")
+    monkeypatch.setattr(installer, "llama_server_path", lambda: server)
+    monkeypatch.setattr(installer, "local_model_path", lambda model: model_file)
+    monkeypatch.setattr(installer, "is_valid", lambda item, path, check_hash=False: True)
+    window._refresh_engine_texts()
+    assert "이 컴퓨터에서만" in window.simple.note.text() and "밖으로 보내지 않습니다" in window.privacy_label.text()
+    window.settings.auto_summarize = True
+    window.open_audio_file(samples / "mock_consult_short.wav", confirm=False)
+    assert wait_until(qapp, lambda: window.session.draft is not None and not window._tasks)
+    assert window.session.draft.model == "Qwen3 8B (이 컴퓨터)"
+    assert "3일 전부터 식후 속쓰림" in window.draft_view.toPlainText()
+    assert not claude_called.exists()  # Claude 로는 아무것도 보내지 않았다
+    llm = window._local_llm
+    assert llm.running
+    window.shutdown()
+    assert not llm.running  # 앱을 닫으면 로컬 모델 서버도 끈다
+
+
+def test_missing_local_model_explains_how_to_get_it(window, qapp, samples, monkeypatch, tmp_path):
+    from clinic_scribe import installer
+
+    monkeypatch.setattr(installer, "llama_server_path", lambda: tmp_path / "없는-llama-server")
+    monkeypatch.setattr(installer, "local_model_path", lambda model: tmp_path / model.file.name)
+    window.settings.summary_engine = "local"
+    window.settings.auto_summarize = True
+    window.open_audio_file(samples / "mock_consult_short.wav", confirm=False)
+    assert wait_until(qapp, lambda: window.session.runs and not window._tasks)
+    assert window.session.summary_short == "모델 없음" and "설치 · 요약 방식" in window.session.summary_note
+    assert window.session.draft is None and window._local_llm is None  # 서버를 띄우지 않았다
+
+
+def test_specialty_picks_reading_sentences_and_is_remembered(window, qapp, monkeypatch):
+    from clinic_scribe.training import SPECIALTY_PROMPTS, build_prompts
+    from clinic_scribe.ui.voice_dialog import VoiceDialog
+
+    window.voices.enroll("황재웅", [np.ones(192, np.float32)], 30.0, "정형외과")
+    dialog = VoiceDialog(window.voices, window._speaker_encoder, FAKE_DEVICE, window, diction=window.diction,
+                         transcribe=lambda pcm16, prompt=None: None)
+    dialog.interactive = False
+    assert "정형외과" in dialog.list.item(0).text()
+    dialog.name_edit.setText("황재웅")  # 이미 등록한 의사: 그 의사의 진료과를 고른다
+    assert dialog.specialty_combo.currentText() == "정형외과"
+    dialog.name_edit.setText("김원장")
+    dialog.specialty_combo.setCurrentText("피부과")
+    dialog.consent.setChecked(True)
+    started = []
+    monkeypatch.setattr(dialog.training, "start", lambda *args: started.append(args))
+    dialog.train_btn.click()
+    name, _device, prompts, specialty = started[0]
+    assert (name, specialty) == ("김원장", "피부과")
+    assert prompts == build_prompts([], specialty="피부과") == list(SPECIALTY_PROMPTS["피부과"])
+    dialog.reject()

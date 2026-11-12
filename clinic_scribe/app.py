@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication
 
+from clinic_scribe import mic_permission
 from clinic_scribe.config import Settings
+from clinic_scribe.ui import theme
 from clinic_scribe.ui.main_window import MainWindow
+from clinic_scribe.ui.widgets import brand_image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DEMO = REPO_ROOT / "samples" / "mock_consult.wav"
@@ -31,10 +36,14 @@ def main(argv: list[str] | None = None) -> int:
         "--summary", choices=("general", "chart"),
         help="요약 종류: general = 일반 대화 요약, chart = 진료 차트 초안 (지정하지 않으면 마지막으로 고른 값)",
     )
+    _ensure_stdio()
     args = parser.parse_args(argv)
     if args.open is not None and not args.open.is_file():
         parser.error(f"파일이 없습니다: {args.open}")
     if args.demo is not None and not args.demo.is_file():
+        if args.demo == DEFAULT_DEMO and sys.platform != "darwin":
+            parser.error("데모 음성(samples/)은 macOS 의 say 로 만듭니다. Mac 에서 만든 samples 폴더를 복사하거나 "
+                         "--demo 다음에 가진 오디오 파일을 지정하세요.")
         if args.demo == DEFAULT_DEMO:
             print("가상 진료 대화 음성을 만드는 중입니다 (macOS say, 약 20초)…", file=sys.stderr)
             subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "make_test_audio.py")], check=False,
@@ -42,8 +51,17 @@ def main(argv: list[str] | None = None) -> int:
         if not args.demo.is_file():
             parser.error(f"데모 입력 파일이 없습니다: {args.demo}")
 
+    if sys.platform == "win32":
+        _windows_taskbar_identity()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("clinic-scribe")
+    app.setDesktopFileName("clinic-scribe")  # Linux: 바로 가기(clinic-scribe.desktop)와 창을 한 앱으로 묶는다
+    if sys.platform != "darwin":
+        # Windows·Linux: OS 테마(밝음/어두움)와 관계없이 macOS 와 같은 어두운 화면 (확인 창·파일 창 포함)
+        app.setStyle("Fusion")
+        app.setPalette(theme.dark_palette())
+    if not mic_permission.launched_as_app():  # 앱으로 열면 macOS 가 그린 앱 아이콘을 그대로 둔다
+        app.setWindowIcon(QIcon(QPixmap.fromImage(brand_image(1024))))  # 터미널에서 띄울 때도 Dock 아이콘을 앱 로고로
     # 화면 색은 어두운 배경 기준이다. 시스템이 밝은 모드여도 설정·확인 창까지 어둡게 맞춘다.
     app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
     settings = Settings.load()
@@ -51,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         settings.summary_mode = args.summary
     window = MainWindow(settings, demo_file=args.demo, demo_speed=args.demo_speed)  # 창 크기는 화면 종류에 맞춘다
     window.show()
+    # 새 컴퓨터 등에서 whisper·모델이 없거나 요약 방식을 아직 고르지 않았으면 '설치' 창을 띄운다
+    QTimer.singleShot(0, window.check_setup)
 
     # 터미널에서 Ctrl+C 를 눌러도 마이크를 놓고 정리한 뒤 끝나게 한다.
     signal.signal(signal.SIGINT, lambda *_: window.close())
@@ -61,3 +81,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.open is not None:
         QTimer.singleShot(0, lambda: window.open_audio_file(args.open, confirm=False))
     return app.exec()
+
+
+def _ensure_stdio() -> None:
+    """Windows 바로 가기(pythonw)로 열면 표준 출력·오류가 없다. 어떤 출력도 앱을 멈추지 않게 버리는 곳으로 돌린다."""
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+
+
+def _windows_taskbar_identity() -> None:
+    """작업 표시줄에 python 아이콘 대신 이 앱 아이콘이 따로 보이게 한다."""
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("local.clinic-scribe")
+    except (AttributeError, OSError):
+        pass

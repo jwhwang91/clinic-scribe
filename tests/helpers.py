@@ -70,6 +70,19 @@ OUTPUTS = {
 }
 
 
+def make_executable(path: Path, code: str) -> Path:
+    """python 코드로 된 가짜 실행 파일. Windows 는 shebang 이 없으므로 .bat 로 감싼다."""
+    if sys.platform == "win32":
+        script = path.with_suffix(".py")
+        script.write_text(code, encoding="utf-8")
+        wrapper = path.with_suffix(".bat")
+        wrapper.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        return wrapper
+    path.write_text(f"#!{sys.executable}\n{code}", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 def make_fake_cli(directory: Path, scenario: str, record: Path | None = None) -> str:
     """scenario 대로 응답하는 가짜 claude. record 를 주면 받은 인자·stdin·환경을 JSON 으로 남긴다.
 
@@ -95,7 +108,55 @@ def make_fake_cli(directory: Path, scenario: str, record: Path | None = None) ->
             open({str(record)!r}, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False))
             """
         )
-    path = directory / f"fake-claude-{scenario}"
-    path.write_text(f"#!{sys.executable}\n{record_code}\n{action}\nraise SystemExit({code})\n", encoding="utf-8")
-    path.chmod(0o755)
-    return str(path)
+    return str(make_executable(directory / f"fake-claude-{scenario}", f"{record_code}\n{action}\nraise SystemExit({code})\n"))
+
+
+FAKE_LLAMA_SERVER = r'''
+import json, sys, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+args = sys.argv[1:]
+port, key = int(args[args.index("--port") + 1]), args[args.index("--api-key") + 1]
+RECORD, DELAY, ANSWERS = __RECORD__, __DELAY__, __ANSWERS__
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.send_response(200 if self.path == "/health" else 404)
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.headers.get("Authorization") != "Bearer " + key:
+            self.send_response(401)
+            self.end_headers()
+            return
+        if RECORD:
+            with open(RECORD, "w", encoding="utf-8") as f:
+                json.dump({"args": args, "body": body}, f, ensure_ascii=False)
+        schema = body["response_format"]["json_schema"]["schema"]
+        text = json.dumps(ANSWERS["general" if "one_line" in schema["properties"] else "chart"], ensure_ascii=False)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for i in range(0, len(text), 25):
+            chunk = {"choices": [{"delta": {"content": text[i:i + 25]}}]}
+            self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=False).encode() + b"\n\n")
+            self.wfile.flush()
+            time.sleep(DELAY)
+        self.wfile.write(b"data: [DONE]\n\n")
+
+
+ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+'''
+
+
+def make_fake_llama_server(directory: Path, record: Path | None = None, delay: float = 0.0) -> Path:
+    """llama-server 와 같은 인자·HTTP API 로 답하는 가짜 (요청한 스키마에 따라 차트 초안 또는 주요 내용 요약)."""
+    code = (FAKE_LLAMA_SERVER.replace("__RECORD__", repr(str(record) if record else ""))
+            .replace("__DELAY__", repr(delay)).replace("__ANSWERS__", repr({"chart": CHART, "general": GENERAL})))
+    return make_executable(directory / "fake-llama-server", code)

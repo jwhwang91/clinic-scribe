@@ -6,8 +6,52 @@ import math
 from collections import deque
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QWidget
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QLinearGradient, QPainter, QPen
+from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QWidget
+
+
+def commit_typing(target: QWidget | None = None) -> None:
+    """입력기에서 아직 조합 중인 글자(한글 마지막 글자 등)를 입력란에 확정한다.
+
+    키보드 포커스를 받지 않는 단추(맥 기본값, 간단 화면의 단추)를 누르면 입력란의 조합이 확정되지 않은 채 단추가
+    동작해, '황재웅' 을 쓰고 바로 단추를 누르면 '황재' 만 읽힌다. 그래서 입력란 밖을 누르기 직전과 이름을 읽기 직전에
+    확정한다. target 이 바로 그 입력란(안)이면 그대로 둔다 (글자 사이를 눌러 커서만 옮기는 경우).
+    """
+    focus = QApplication.focusWidget()
+    if focus is None or not focus.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled):
+        return
+    if target is not None and (target is focus or focus.isAncestorOf(target)):
+        return
+    method = QGuiApplication.inputMethod()
+    method.commit()  # macOS·Linux(IBus): 조합 중인 글자를 확정한다
+    method.reset()  # Windows 는 reset 이 조합 중인 글자를 확정한다. 이미 확정했으면 아무 일도 없다
+
+
+def paint_brand(p: QPainter, size: float, corner: float = 8 / 26) -> None:
+    """앱 표시: 둥근 사각형 안의 음성 막대 세 개. 26px 기준 그림을 size 로 늘린다 (corner = 모서리 반지름 / size)."""
+    s = size / 26.0
+    gradient = QLinearGradient(0, 0, size, size)
+    gradient.setColorAt(0.0, QColor("#8b8ef8"))
+    gradient.setColorAt(1.0, QColor("#4f46e5"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(gradient)
+    p.drawRoundedRect(QRectF(0, 0, size, size), size * corner, size * corner)
+    p.setBrush(QColor("#ffffff"))
+    for x, height in ((7.0, 8.0), (11.5, 14.0), (16.0, 10.0)):
+        p.drawRoundedRect(QRectF(x * s, (13 - height / 2) * s, 3 * s, height * s), 1.5 * s, 1.5 * s)
+
+
+def brand_image(size: int) -> QImage:
+    """앱 아이콘 (Dock·응용 프로그램 폴더). macOS 아이콘 격자(1024 안에 824, 모서리 185)에 맞춘다."""
+    image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    p = QPainter(image)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    body = size * 824 / 1024
+    p.translate((size - body) / 2, (size - body) / 2)
+    paint_brand(p, body, corner=185 / 824)
+    p.end()
+    return image
 
 
 class BrandMark(QWidget):
@@ -20,15 +64,7 @@ class BrandMark(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt 이름)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        gradient = QLinearGradient(0, 0, 26, 26)
-        gradient.setColorAt(0.0, QColor("#8b8ef8"))
-        gradient.setColorAt(1.0, QColor("#4f46e5"))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(gradient)
-        p.drawRoundedRect(QRectF(0, 0, 26, 26), 8, 8)
-        p.setBrush(QColor("#ffffff"))
-        for x, height in ((7.0, 8.0), (11.5, 14.0), (16.0, 10.0)):
-            p.drawRoundedRect(QRectF(x, 13 - height / 2, 3, height), 1.5, 1.5)
+        paint_brand(p, 26)
 
 
 class LevelMeter(QWidget):
@@ -173,7 +209,7 @@ class PipelineView(QWidget):
 
     STEPS = (
         ("record", "① 녹음"),
-        ("transcribe", "② 전사 · whisper.cpp (이 Mac)"),
+        ("transcribe", "② 전사 · whisper.cpp (이 컴퓨터)"),
         ("summary", "③ 요약 · Claude (전송)"),
         ("review", "④ 검토"),
     )

@@ -98,3 +98,22 @@ def test_real_reading_session_improves_transcription(samples, manifest, whisper_
     assert result.correct_after > result.correct_before and result.correct_after >= len(DEFAULT_PROMPTS) - 1
     assert any(f.expected.startswith("트리메부틴") for f in result.findings)
     assert result.embeddings and result.speech_seconds > 30
+
+
+def test_each_specialty_has_its_own_reading_sentences():
+    from clinic_scribe.training import GENERAL, SPECIALTIES, SPECIALTY_PROMPTS
+
+    assert SPECIALTIES[0] == GENERAL and SPECIALTY_PROMPTS[GENERAL] == DEFAULT_PROMPTS
+    assert len(SPECIALTIES) >= 10
+    seen = set()
+    for specialty, prompts in SPECIALTY_PROMPTS.items():
+        assert len(prompts) == 12 and len(set(prompts)) == 12, specialty
+        assert all(p.strip() and len(p) <= 40 for p in prompts), specialty  # 한 문장을 몇 초 안에 따라 읽을 수 있게
+        assert not (seen & set(prompts)), specialty  # 과마다 다른 문장
+        seen |= set(prompts)
+    assert any("셀레콕시브" in p for p in SPECIALTY_PROMPTS["정형외과"])
+    assert any("오셀타미비르" in p for p in SPECIALTY_PROMPTS["소아청소년과"])
+    assert build_prompts([], specialty="정형외과") == list(SPECIALTY_PROMPTS["정형외과"])
+    assert build_prompts([], specialty="없는 과") == list(DEFAULT_PROMPTS)
+    own = build_prompts(["트리메부틴"], specialty="안과")
+    assert own[0] == "트리메부틴 처방해 드릴게요." and own[1:] == list(SPECIALTY_PROMPTS["안과"][:11])

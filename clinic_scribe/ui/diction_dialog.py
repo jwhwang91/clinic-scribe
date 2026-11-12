@@ -173,6 +173,12 @@ class DictionEditor(QWidget):
         names = self._scopes() + [d for d in self.diction.doctors() if d not in self._scopes()]
         _fill_scopes(self.scope_combo, names, self._scope)
 
+    def scope_renamed(self, old: str, new: str) -> None:
+        """의사 이름이 바뀌었다: 그 의사의 사전을 보고 있었으면 새 이름으로 계속 보여 준다."""
+        if self._scope == old:
+            self._scope = new
+        self.refresh_scopes()
+
     def select_scope(self, scope: str) -> None:
         self.scope_combo.setCurrentIndex(max(0, self.scope_combo.findData(scope)))
 
