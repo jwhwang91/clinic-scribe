@@ -25,6 +25,7 @@ import threading
 from dataclasses import dataclass
 
 from clinic_scribe import procutil
+from clinic_scribe.config import claude_command
 from clinic_scribe.speakers import PATIENT
 from clinic_scribe.whisper import TranscriptSegment, format_time
 
@@ -271,7 +272,7 @@ def build_stdin(segments: list[TranscriptSegment]) -> str:
 def build_command(cfg: ClaudeConfig) -> list[str]:
     system_prompt, instruction, schema = MODES[cfg.mode]
     cmd = [
-        cfg.cli or "claude",
+        *claude_command(cfg.cli or "claude"),
         "-p",
         "--model", cfg.model,
         "--output-format", "json",

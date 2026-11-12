@@ -236,7 +236,8 @@ def test_digital_silence_warns_about_permission(window, qapp, monkeypatch):
     monkeypatch.setattr(recorder.sd, "InputStream", ZeroStream)
     window.record_btn.click()
     assert wait_until(qapp, lambda: window.error_label.isVisible(), 5)
-    assert "디지털 무음" in window.error_label.text() and "개인정보 보호 및 보안" in window.error_label.text()
+    settings_place = {"darwin": "개인정보 보호 및 보안", "win32": "개인 정보 및 보안"}.get(sys.platform, "소리 설정")
+    assert "디지털 무음" in window.error_label.text() and settings_place in window.error_label.text()
     window._on_cancel_recording()
     assert not window.recorder.active
 
@@ -245,8 +246,9 @@ def test_denied_permission_is_shown(window, qapp, monkeypatch):
     monkeypatch.setattr(mic_permission, "authorization_status", lambda: "denied")
     window.record_btn.click()
     assert not window.recorder.active
-    assert "마이크 권한이 거부" in window.error_label.text()
-    assert "시스템 설정 → 개인정보 보호 및 보안 → 마이크" in window.error_label.text()
+    assert window.error_label.text() == mic_permission.denied_message("denied")  # OS 에 맞는 안내
+    if sys.platform == "darwin":
+        assert "시스템 설정 → 개인정보 보호 및 보안 → 마이크" in window.error_label.text()
 
 
 def test_stream_open_failure_is_shown(window, qapp, monkeypatch):

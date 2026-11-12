@@ -273,3 +273,27 @@ def test_setup_scripts_for_each_os():
         for name in ("setup_macos.sh", "setup_linux.sh"):
             assert subprocess.run(["bash", "-n", str(repo / "scripts" / name)]).returncode == 0
     assert "eol=crlf" in (repo / ".gitattributes").read_text(encoding="utf-8")
+
+
+def test_windows_npm_claude_runs_through_node_not_cmd(on, monkeypatch, tmp_path):
+    """npm 의 claude.cmd 는 cmd.exe 가 인자(따옴표·꺾쇠·한글)를 다시 해석해 깨뜨린다 → cli.js 를 node 로 바로 실행한다."""
+    npm = tmp_path / "npm"
+    script = npm / "node_modules" / "@anthropic-ai" / "claude-code" / "cli.js"
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    (npm / "node.exe").write_text("")
+    (npm / "claude.cmd").write_text("")
+    on("win32")
+    assert config.claude_command(str(npm / "claude.cmd")) == [str(npm / "node.exe"), str(script)]
+    assert config.claude_command(str(tmp_path / "claude.exe")) == [str(tmp_path / "claude.exe")]  # 공식 설치본은 그대로
+    from clinic_scribe.summarizer import ClaudeConfig, build_command
+
+    assert build_command(ClaudeConfig(cli=str(npm / "claude.cmd"), model="m"))[:3] == [str(npm / "node.exe"), str(script), "-p"]
+    native = tmp_path / ".local" / "bin" / "claude.exe"  # 공식 설치본이 있으면 claude.cmd 보다 먼저
+    native.parent.mkdir(parents=True)
+    native.write_text("")
+    monkeypatch.setattr(config, "claude_cli_candidates", lambda: [str(native), str(npm / "claude.cmd")])
+    monkeypatch.setattr(config.shutil, "which", lambda name: str(npm / "claude.cmd"))
+    assert config.Settings().claude_cli_path() == str(native)
+    on("darwin")
+    assert config.claude_command(str(npm / "claude.cmd")) == [str(npm / "claude.cmd")]

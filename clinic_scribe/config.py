@@ -120,6 +120,21 @@ def _short_path(path: str) -> str | None:
         return None
 
 
+def claude_command(cli: str) -> list[str]:
+    """claude 를 실행하는 명령의 앞부분.
+
+    Windows 의 npm 설치본(claude.cmd)을 그대로 실행하면 cmd.exe 가 인자를 다시 해석해 작성 규칙·JSON 형식에 든
+    따옴표·꺾쇠(<, >)·한글이 깨진다. 그래서 같은 꾸러미의 cli.js 를 node 로 바로 실행한다 (공식 설치본 claude.exe 는 그대로).
+    """
+    if sys.platform == "win32" and cli.lower().endswith((".cmd", ".bat")):
+        folder = Path(cli).parent
+        script = folder / "node_modules" / "@anthropic-ai" / "claude-code" / "cli.js"
+        node = folder / "node.exe" if (folder / "node.exe").is_file() else shutil.which("node")
+        if script.is_file() and node:
+            return [str(node), str(script)]
+    return [cli]
+
+
 def settings_path() -> Path:
     env = os.environ.get("CLINIC_SCRIBE_SETTINGS")
     if env:
@@ -239,9 +254,14 @@ class Settings:
         )
 
     def claude_cli_path(self) -> str | None:
-        return find_executable(
+        found = find_executable(
             self.claude_cli or os.environ.get("CLINIC_SCRIBE_CLAUDE_CLI", ""), "claude", claude_cli_candidates()
         )
+        if found and sys.platform == "win32" and found.lower().endswith((".cmd", ".bat")) and not self.claude_cli:
+            # 공식 설치본(claude.exe)이 있으면 npm 의 claude.cmd 보다 먼저 쓴다 (claude_command 참고)
+            native = next((c for c in claude_cli_candidates() if c.lower().endswith(".exe") and os.path.isfile(c)), None)
+            return native or found
+        return found
 
     # ---- 저장/불러오기 ----------------------------------------------------
     @classmethod

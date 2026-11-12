@@ -10,7 +10,7 @@ on:
 jobs:
   samples:
     name: 가상 음성 만들기 (macOS say)
-    runs-on: macos-14
+    runs-on: macos-latest
     # GitHub 의 Mac 에 한국어 음성(Yuna)이 없으면 실패한다. 그때도 나머지 테스트는 돌고, 음성이 필요한 테스트만 건너뛴다.
     continue-on-error: true
     steps:
@@ -32,9 +32,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022, macos-14]
+        os: [ubuntu-24.04, windows-2022, macos-latest]
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }}
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -67,4 +68,5 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
-          "$PY" -m pytest -q -rs
+          # 테스트 하나가 5분을 넘으면 모든 스레드가 어디서 멈췄는지 로그에 남긴다
+          "$PY" -m pytest -v -rs -o faulthandler_timeout=300

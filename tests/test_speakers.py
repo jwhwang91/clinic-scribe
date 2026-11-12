@@ -1,5 +1,6 @@
 import os
 import stat
+import sys
 import threading
 
 import numpy as np
@@ -43,7 +44,8 @@ def test_voice_book_enroll_identify_remove_and_file(tmp_path):
     name, score = book.identify(axis(3), 0.5)
     assert name is None and score < 0.5  # 등록되지 않은 목소리
     book.save()
-    assert stat.S_IMODE(os.stat(book.path).st_mode) == 0o600  # 생체인식정보: 이 사용자만 읽는다
+    if sys.platform != "win32":  # Windows 는 사용자 폴더(%LOCALAPPDATA%) 권한으로 보호된다
+        assert stat.S_IMODE(os.stat(book.path).st_mode) == 0o600  # 생체인식정보: 이 사용자만 읽는다
     loaded = VoiceBook.load(book.path)
     assert loaded.names() == ["김원장", "이원장"]
     loaded.remove("김원장")

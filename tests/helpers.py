@@ -71,13 +71,26 @@ OUTPUTS = {
 
 
 def make_executable(path: Path, code: str) -> Path:
-    """python 코드로 된 가짜 실행 파일. Windows 는 shebang 이 없으므로 .bat 로 감싼다."""
+    """python 코드로 된 가짜 실행 파일.
+
+    Windows 는 shebang 이 없고 .bat 는 cmd.exe 가 인자(따옴표·꺾쇠·한글)를 다시 해석해 깨뜨리므로, pip 이 콘솔 스크립트를
+    만드는 것과 같이 실행 파일(launcher .exe + 실행할 python + __main__.py 를 담은 zip)로 만든다.
+    """
     if sys.platform == "win32":
-        script = path.with_suffix(".py")
-        script.write_text(code, encoding="utf-8")
-        wrapper = path.with_suffix(".bat")
-        wrapper.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
-        return wrapper
+        import io
+        import platform
+        import zipfile
+
+        import pip
+
+        stub = "t64-arm.exe" if platform.machine().lower() in ("arm64", "aarch64") else "t64.exe"
+        launcher = (Path(pip.__file__).parent / "_vendor" / "distlib" / stub).read_bytes()
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr("__main__.py", code)
+        exe = path.with_suffix(".exe")
+        exe.write_bytes(launcher + f'#!"{sys.executable}"\n'.encode() + archive.getvalue())
+        return exe
     path.write_text(f"#!{sys.executable}\n{code}", encoding="utf-8")
     path.chmod(0o755)
     return path

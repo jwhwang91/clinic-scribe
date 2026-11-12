@@ -201,6 +201,11 @@ def _cpu_name() -> str:
             name = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True,
                                   timeout=5).stdout.strip()
             return name or platform.processor() or "CPU"
+        if sys.platform == "win32":
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+                return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
         if sys.platform.startswith("linux"):
             with open("/proc/cpuinfo", encoding="utf-8") as f:
                 for line in f:
