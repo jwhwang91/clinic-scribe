@@ -75,16 +75,17 @@ jobs:
           if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
           # 테스트 하나가 5분을 넘으면 모든 스레드가 어디서 멈췄는지 로그에 남긴다
           "$PY" -m pytest -v -rs -o faulthandler_timeout=300
-      - name: 종료 점검 (Windows 에서 테스트가 다 끝난 뒤 Python 이 닫히다 비정상 종료하는 곳 찾기)
-        # 앱을 닫을 때도 같은 일이 생기는지 보려고, 앱이 쓰는 것을 하나씩 열고 닫아 종료 코드를 남긴다 (0 이 정상)
-        if: ${{ always() && runner.os == 'Windows' }}
+      - name: 종료 점검 (Python 이 닫히다 비정상 종료하지 않는지)
+        # 테스트가 다 끝난 뒤 Python 이 닫히다 비정상 종료한 일(Windows access violation · Linux segmentation fault)이 있어,
+        # 앱이 쓰는 것을 하나씩 열고 닫은 종료 코드와, 실제 앱을 열었다 닫은 종료 코드를 남긴다 (0 이 정상)
+        if: ${{ always() && runner.os != 'macOS' }}
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONFAULTHANDLER: "1"
-          CLINIC_SCRIBE_SETTINGS: ${{ runner.temp }}/exit-check-settings.json
+          CLINIC_SCRIBE_SETTINGS: ${{ runner.temp }}/exit-check/settings.json
         run: |
-          PY=.venv/Scripts/python.exe
+          if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
           check() { "$PY" -c "$2"; echo "종료 점검 · $1: 종료 코드 $?"; }
           check "numpy·soundfile·soxr" "import numpy, soundfile, soxr"
           check "sounddevice (PortAudio)" "import sounddevice"
@@ -92,4 +93,16 @@ jobs:
           check "화자 인식 모델" "from clinic_scribe.config import Settings; from clinic_scribe.speakers import SpeakerEncoder; e = SpeakerEncoder(Settings().speaker_model_path())"
           check "Qt" "from PySide6.QtWidgets import QApplication; app = QApplication([])"
           check "Qt + 화자 인식 모델" "from PySide6.QtWidgets import QApplication; app = QApplication([]); from clinic_scribe.config import Settings; from clinic_scribe.speakers import SpeakerEncoder; e = SpeakerEncoder(Settings().speaker_model_path())"
-          check "앱 창 열고 닫기" "from PySide6.QtWidgets import QApplication; app = QApplication([]); from clinic_scribe.config import Settings; from clinic_scribe.ui.main_window import MainWindow; w = MainWindow(Settings()); w.show(); app.processEvents(); w.close()"
+          check "앱 창을 정리하지 않고 끝내기 (고치기 전 테스트와 같음)" "from PySide6.QtWidgets import QApplication; app = QApplication([]); from clinic_scribe.config import Settings; from clinic_scribe.ui.main_window import MainWindow; w = MainWindow(Settings()); w.show(); app.processEvents(); w.close()"
+          # 실제 앱 (python -m clinic_scribe 와 같은 main): 열고 2초 뒤 모든 창(설치 창 포함)을 닫는다
+          check "앱 열고 닫기 (app.main)" "
+          import sys
+          from PySide6.QtCore import QTimer
+          from PySide6.QtWidgets import QApplication
+          import clinic_scribe.app as app_module
+          class AutoClose(QApplication):
+              def exec(self):
+                  QTimer.singleShot(2000, QApplication.closeAllWindows)
+                  return super().exec()
+          app_module.QApplication = AutoClose
+          sys.exit(app_module.main([]))"

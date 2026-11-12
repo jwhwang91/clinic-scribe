@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import shiboken6
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication
@@ -80,7 +81,29 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.open is not None:
         QTimer.singleShot(0, lambda: window.open_audio_file(args.open, confirm=False))
-    return app.exec()
+    code = app.exec()
+    # Python 이 닫히기 전에 Qt 를 정리한다: 창을 붙잡고 있던 Ctrl+C 처리기를 풀고, 창과 QApplication 을 지운다
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    wake.stop()
+    close_qt()
+    return code
+
+
+def close_qt() -> None:
+    """남은 창과 QApplication 을 지금 지운다 (앱을 닫을 때·테스트가 다 끝났을 때, Python 이 닫히기 전에).
+
+    남겨 두면 Python 이 닫히는 도중에 Qt 가 지우면서 이미 정리된 창의 Python 코드를 불러, Windows·Linux 에서 가끔
+    비정상 종료한다 (CI 에서 본 일: 모든 테스트가 끝난 뒤 access violation · segmentation fault, Python 코드 밖).
+    부모가 있는 창은 부모와 함께 지워지므로, Python 이 만든 부모 없는 창만 먼저 골라 지운다.
+    """
+    app = QApplication.instance()
+    if app is None:
+        return
+    roots = [w for w in QApplication.topLevelWidgets() if w.parent() is None and shiboken6.createdByPython(w)]
+    for widget in roots:
+        if shiboken6.isValid(widget):
+            shiboken6.delete(widget)
+    shiboken6.delete(app)
 
 
 def _ensure_stdio() -> None:

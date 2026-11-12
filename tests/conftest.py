@@ -90,6 +90,17 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+def pytest_sessionfinish(session, exitstatus):
+    """Qt 화면 테스트를 했으면 남은 창과 QApplication 을 지금 지운다 (앱을 닫을 때와 같게, clinic_scribe.app.close_qt).
+
+    Python 이 닫히는 도중에 Qt 가 지우게 두면 Windows·Linux 에서 가끔 비정상 종료했다.
+    """
+    if "PySide6.QtWidgets" in sys.modules:
+        from clinic_scribe.app import close_qt
+
+        close_qt()
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_unconfigure(config):
     """CI: 테스트가 다 끝났는데 Python 이 닫히지 않으면(Linux 에서 1시간 멈춘 일) 60초 뒤 모든 스레드가 멈춘 곳을 남기고 끝낸다."""
