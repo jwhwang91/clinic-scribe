@@ -128,7 +128,8 @@ def test_guess_doctor_by_majority(tmp_path, monkeypatch):
 def test_doctor_terms_and_corrections_fix_drug_names(samples, whisper_runner, speaker_encoder, settings, tmp_path):
     """가상 진료: 의사를 알아내 그 의사의 용어로 전사하고, 그 의사의 교정으로 잘못 들린 약 이름을 고친다."""
     from clinic_scribe.audio import load_audio_file, to_whisper_pcm
-    from clinic_scribe.speakers import enrollment_embeddings, label_segments, speech_only
+    from clinic_scribe.speakers import enrollment_embeddings, label_turns, speech_only
+    from clinic_scribe.whisper import merge_phrases
 
     def pcm(name):
         data, rate = load_audio_file(samples / name)
@@ -146,8 +147,11 @@ def test_doctor_terms_and_corrections_fix_drug_names(samples, whisper_runner, sp
     threshold = settings.speaker_threshold
 
     def transcribe(prompt=None):
+        # 앱과 같은 순서: 말 덩어리마다 말한 사람을 정해 줄로 잇고(사람이 바뀌면 새 줄), 그 의사 사전으로 고친다.
+        # 문장부호가 빠지면(GPU 없는 Whisper 빌드에서 본 일) 덩어리를 먼저 이은 줄에서는 의사·환자 말이 섞인다.
         result = whisper_runner.transcribe(consult, use_vad=True, params=settings.vad, prompt=prompt)
-        return apply_corrections(label_segments(result.segments, consult, speaker_encoder, voices, threshold), book)
+        lines = merge_phrases(label_turns(result.phrases, consult, speaker_encoder, voices, threshold))
+        return apply_corrections(lines, book)
 
     # 1) 기본 힌트로 받아 적어도 교정 사전이 그 의사 발화의 잘못 들린 말을 고친다 (원래 들린 말은 남는다)
     plain = transcribe()

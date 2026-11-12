@@ -75,3 +75,21 @@ jobs:
           if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
           # 테스트 하나가 5분을 넘으면 모든 스레드가 어디서 멈췄는지 로그에 남긴다
           "$PY" -m pytest -v -rs -o faulthandler_timeout=300
+      - name: 종료 점검 (Windows 에서 테스트가 다 끝난 뒤 Python 이 닫히다 비정상 종료하는 곳 찾기)
+        # 앱을 닫을 때도 같은 일이 생기는지 보려고, 앱이 쓰는 것을 하나씩 열고 닫아 종료 코드를 남긴다 (0 이 정상)
+        if: ${{ always() && runner.os == 'Windows' }}
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONFAULTHANDLER: "1"
+          CLINIC_SCRIBE_SETTINGS: ${{ runner.temp }}/exit-check-settings.json
+        run: |
+          PY=.venv/Scripts/python.exe
+          check() { "$PY" -c "$2"; echo "종료 점검 · $1: 종료 코드 $?"; }
+          check "numpy·soundfile·soxr" "import numpy, soundfile, soxr"
+          check "sounddevice (PortAudio)" "import sounddevice"
+          check "sherpa-onnx" "import sherpa_onnx"
+          check "화자 인식 모델" "from clinic_scribe.config import Settings; from clinic_scribe.speakers import SpeakerEncoder; e = SpeakerEncoder(Settings().speaker_model_path())"
+          check "Qt" "from PySide6.QtWidgets import QApplication; app = QApplication([])"
+          check "Qt + 화자 인식 모델" "from PySide6.QtWidgets import QApplication; app = QApplication([]); from clinic_scribe.config import Settings; from clinic_scribe.speakers import SpeakerEncoder; e = SpeakerEncoder(Settings().speaker_model_path())"
+          check "앱 창 열고 닫기" "from PySide6.QtWidgets import QApplication; app = QApplication([]); from clinic_scribe.config import Settings; from clinic_scribe.ui.main_window import MainWindow; w = MainWindow(Settings()); w.show(); app.processEvents(); w.close()"
