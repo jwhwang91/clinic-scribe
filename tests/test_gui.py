@@ -522,15 +522,25 @@ def test_space_bar_leaves_text_fields_and_dialogs_alone(window, qapp, monkeypatc
     window._on_cancel_recording()
 
 
-def test_auto_split_on_next_patient_cue(window, qapp, samples):
+def heard_live(window, monkeypatch) -> list[str]:
+    """실시간 전사가 받아 적은 말 (가상 대화). 신호 단어를 못 찾았을 때 무엇을 들었는지 실패 메시지에 보인다."""
+    heard: list[str] = []
+    original = window._check_cues
+    monkeypatch.setattr(window, "_check_cues", lambda segments: heard.extend(s.text for s in segments) or original(segments))
+    return heard
+
+
+def test_auto_split_on_next_patient_cue(window, qapp, samples, monkeypatch):
     """스페이스바를 누르지 않아도 '들어오세요'에서 진료가 나뉘고 녹음은 이어진다."""
     window.settings.min_session_s = 5
+    window.settings.split_silence_s = 3600  # 느린 컴퓨터에서 실시간 전사가 늦게 끝나도 무음으로 먼저 나누지 않게
+    heard = heard_live(window, monkeypatch)
     FakeInputStream.source = source_audio(samples / "two_patients.wav")
     window.record_btn.click()
-    assert wait_until(qapp, lambda: len(window.sessions) == 2, 40)
+    assert wait_until(qapp, lambda: len(window.sessions) == 2, 40), heard
     assert window.recorder.active  # 녹음은 끊기지 않는다
     first, second = window.sessions
-    assert "들어오세요" in first.end_reason and second.auto_continued
+    assert "들어오세요" in first.end_reason and second.auto_continued, (first.end_reason, heard)
     assert wait_until(qapp, lambda: window.recorder.elapsed > 19.5, 20)
     window.record_btn.click()
     assert wait_until(qapp, lambda: first.runs and second.runs, 60)
@@ -637,13 +647,14 @@ def test_cue_splits_only_when_registered_doctor_says_it(window, qapp, samples, s
     checked = []
     original = window._cue_from_doctor
     monkeypatch.setattr(window, "_cue_from_doctor", lambda seg: checked.append(original(seg)) or checked[-1])
+    heard = heard_live(window, monkeypatch)
 
     # 다른 사람만 등록: 대화 속 의사(등록 안 됨)의 '들어오세요'로는 나누지 않는다
     enroll_voice(window, samples / "voice_enroll_other.wav", "박원장", speaker_encoder)
     FakeInputStream.source = source_audio(samples / "two_patients.wav")
     window.record_btn.click()
     assert wait_until(qapp, lambda: window.recorder.elapsed > 19.5, 40)
-    assert wait_until(qapp, lambda: checked, 60)  # GPU 없는 컴퓨터는 실시간 전사가 녹음보다 늦게 신호 단어에 닿는다
+    assert wait_until(qapp, lambda: checked, 60), heard  # GPU 없는 컴퓨터는 실시간 전사가 녹음보다 늦게 신호 단어에 닿는다
     assert not any(checked) and len(window.sessions) == 1
     window._on_cancel_recording()
 
@@ -651,7 +662,7 @@ def test_cue_splits_only_when_registered_doctor_says_it(window, qapp, samples, s
     checked.clear()
     enroll_voice(window, samples / "voice_enroll_doctor.wav", "김원장", speaker_encoder)
     window.record_btn.click()
-    assert wait_until(qapp, lambda: len(window.sessions) == 2, 40)
+    assert wait_until(qapp, lambda: len(window.sessions) == 2, 40), heard
     assert checked[-1] is True and "들어오세요" in window.sessions[0].end_reason
     window._on_cancel_recording()
 
