@@ -487,8 +487,10 @@ GUI 테스트는 마이크 대신 가짜 입력 스트림으로 녹음 버튼·�
 **다른 OS**: 가상 음성은 macOS `say` 로 만들므로 Windows·Linux 에서는 Mac 에서 만든 `samples/` 를 복사해 씁니다(없으면 그 테스트만 건너뜀).
 OS 마다 다른 부분(경로·권한·장치 목록·프로세스 정리·한글 경로·Whisper 힌트)은 `tests/test_platforms.py` 가 이 컴퓨터에서 OS 를 바꿔 가며 확인하고,
 받기·풀기·사양 판단은 `tests/test_installer.py`, 로컬 요약은 가짜 llama-server 로 `tests/test_local_llm.py`, '설치' 창은 `tests/test_setup_dialog.py` 가 확인합니다.
-GitHub 에 push 하면 `.github/workflows/tests.yml` 이 macOS 에서 가상 음성을 만들어 **Windows·Linux·macOS 컴퓨터에서 설치 스크립트와 전체 테스트**를 돌립니다
-(실제 whisper.cpp 공식 빌드·모델을 받아 실제로 전사함).
+GitHub 에 push 하면 `.github/workflows/tests.yml` 이 macOS 에서 가상 음성을 만들어 **Windows·Linux 컴퓨터에서 설치 스크립트와 전체 테스트**를 돌립니다
+(실제 whisper.cpp 공식 빌드·모델을 받아 실제로 전사함). 테스트가 끝나면 앱을 열고 닫아 Python 이 비정상 종료하지 않는지도 봅니다.
+macOS 는 설치 스크립트와 Whisper 모델이 필요 없는 테스트만 돌립니다: GitHub 의 Mac 가상 컴퓨터는 GPU 를 못 써 전체 테스트가 90분 안에
+끝나지 않습니다. macOS 전체 테스트는 개발하는 Mac 에서 GPU 로 돌립니다.
 
 ### 수동 테스트 순서 (실제 내장 마이크)
 
@@ -560,7 +562,7 @@ clinic_scribe/
                           setup_dialog = '설치' 창: 빠진 것 받기·요약 방식·로컬 모델, emr_probe_dialog = 씨차트 연결 점검)
 scripts/  setup.py (OS 공통 설치) · setup_macos.sh · setup_linux.sh · setup_windows.bat · run.sh · run.bat
           make_launcher.sh + launcher.c (macOS 앱 아이콘) · make_test_audio.py · bench_ollama.py(실험)
-.github/workflows/tests.yml   Windows·Linux·macOS 에서 설치·전체 테스트
+.github/workflows/tests.yml   Windows·Linux 에서 설치·전체 테스트·종료 점검, macOS 에서 설치·모델 없는 테스트
 .github/workflows/emr-probe.yml  Windows 에서 씨차트 연결 점검 (가짜 진료 차트 창)
 tests/    단위·통합·GUI 테스트 (가짜 claude 실행 파일, 가짜 마이크 입력, 가짜 진료 차트 창 포함)
 ```

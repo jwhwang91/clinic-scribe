@@ -1,4 +1,5 @@
-# Windows · Linux · macOS 실제 컴퓨터에서 설치 스크립트와 전체 테스트를 돌린다.
+# Windows · Linux 실제 컴퓨터에서 설치 스크립트와 전체 테스트를 돌린다. macOS 는 설치 스크립트와 Whisper 모델이 필요 없는 테스트만:
+# GitHub 의 Mac 가상 컴퓨터는 GPU 를 못 써 Whisper 가 CPU 3개로 돌아 90분 안에 끝나지 않는다 (전체 테스트는 개발하는 Mac 에서 GPU 로).
 # 가상 음성(samples/)은 macOS say 로 만들어 다른 OS 에 넘긴다. 실제 Claude 요약 테스트는 돌리지 않는다(가짜 claude).
 name: tests
 
@@ -74,7 +75,11 @@ jobs:
         run: |
           if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=.venv/Scripts/python.exe; fi
           # 테스트 하나가 5분을 넘으면 모든 스레드가 어디서 멈췄는지 로그에 남긴다
-          "$PY" -m pytest -v -rs -o faulthandler_timeout=300
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            "$PY" -m pytest -v -rs -o faulthandler_timeout=300 -m "not models"  # GPU 없는 Mac 가상 컴퓨터 (위 설명)
+          else
+            "$PY" -m pytest -v -rs -o faulthandler_timeout=300
+          fi
       - name: 종료 점검 (Python 이 닫히다 비정상 종료하지 않는지)
         # 테스트가 다 끝난 뒤 Python 이 닫히다 비정상 종료한 일(Windows access violation · Linux segmentation fault)이 있어,
         # 앱이 쓰는 것을 하나씩 열고 닫은 종료 코드와, 실제 앱을 열었다 닫은 종료 코드를 남긴다 (0 이 정상)
