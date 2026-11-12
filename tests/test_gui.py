@@ -533,7 +533,7 @@ def heard_live(window, monkeypatch) -> list[str]:
 def test_auto_split_on_next_patient_cue(window, qapp, samples, monkeypatch):
     """스페이스바를 누르지 않아도 '들어오세요'에서 진료가 나뉘고 녹음은 이어진다."""
     window.settings.min_session_s = 5
-    window.settings.split_silence_s = 3600  # 느린 컴퓨터에서 실시간 전사가 늦게 끝나도 무음으로 먼저 나누지 않게
+    window.settings.split_silence_s = 3600  # 느린 컴퓨터에서 실시간 전사가 늦게 끝나도 무음으로 먼저 나누지 않게 (아래 테스트 참고)
     heard = heard_live(window, monkeypatch)
     FakeInputStream.source = source_audio(samples / "two_patients.wav")
     window.record_btn.click()
@@ -644,6 +644,9 @@ def test_transcript_marks_registered_doctor(window, qapp, samples, speaker_encod
 def test_cue_splits_only_when_registered_doctor_says_it(window, qapp, samples, speaker_encoder, monkeypatch):
     """의사를 등록했으면 '들어오세요'를 말한 목소리가 등록한 의사일 때만 진료를 나눈다."""
     window.settings.min_session_s = 5
+    # 느린 컴퓨터(Linux CI)에서 실시간 전사가 90초 넘게 늦으면 무음으로 먼저 나뉘어, 늦게 온 '들어오세요'는
+    # 이미 나뉜 앞 진료의 말로 건너뛴다. 이 테스트는 신호 단어만 보므로 무음으로는 나누지 않게 한다
+    window.settings.split_silence_s = 3600
     checked = []
     original = window._cue_from_doctor
     monkeypatch.setattr(window, "_cue_from_doctor", lambda seg: checked.append(original(seg)) or checked[-1])
