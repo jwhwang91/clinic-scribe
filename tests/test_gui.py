@@ -1059,3 +1059,28 @@ def test_history_patient_names_search_and_grouping(window, qapp):
     assert window.simple.history_items()[0].data(_ROW_ROLE).patient == ""  # 묶음 제목이 이름이니 줄에는 날짜·시각
     window.simple.group_day.click()
     assert window.settings.history_group == "day"
+
+
+def test_record_button_starts_stops_and_copies_the_summary(window, qapp, samples, monkeypatch):
+    """녹음 버튼(전역 단축키): 씨차트를 보며 눌러 녹음을 시작·종료하고, 요약이 끝나면 클립보드에 복사한다 (튀어 두 번 눌린 것은 한 번)."""
+    from clinic_scribe.ui import main_window
+
+    cues = []
+    monkeypatch.setattr(main_window, "play_cue", cues.append)
+    FakeInputStream.source = source_audio(samples / "mock_consult_short.wav")
+    window.settings.auto_summarize = True
+    qapp.clipboard().setText("앞서 복사한 것")
+    window._on_hotkey()
+    assert window.recorder.active and window._recording_session.via_hotkey and cues == ["start"]
+    assert window.overlay.kind == "recording" and window.overlay.text.startswith("녹음 중")
+    window._on_hotkey()  # 0.8초 안에 또 눌림(버튼이 튐): 한 번으로 본다
+    assert window.recorder.active
+    assert wait_until(qapp, lambda: window.recorder.elapsed > 10.5, 10)
+    window._last_hotkey = 0.0
+    window._on_hotkey()
+    assert not window.recorder.active and cues == ["start", "stop"]
+    assert window.overlay.kind == "busy"  # 전사·요약 중
+    assert qapp.clipboard().text() == "앞서 복사한 것"
+    assert wait_until(qapp, lambda: window.session.draft is not None, 120)
+    assert qapp.clipboard().text().startswith("[검토용 초안]")  # 요약 복사 단추와 같은 글
+    assert window.overlay.kind == "done" and "Ctrl+V" in window.overlay.detail and cues[-1] == "done"

@@ -11,6 +11,8 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # 테스트 중에 만든 앱 창이 GitHub 에 새 버전을 묻거나 repo 를 바꾸지 않게 (자동 업데이트 테스트는 이 값을 지운다)
 os.environ.setdefault("CLINIC_SCRIBE_NO_UPDATE", "1")
+# 테스트 중에 만든 앱 창이 실제 녹음 버튼(전역 단축키)을 등록하지 않게 (단축키 테스트는 직접 등록한다)
+os.environ.setdefault("CLINIC_SCRIBE_NO_HOTKEY", "1")
 
 REPO = Path(__file__).resolve().parent.parent
 SAMPLES = REPO / "samples"

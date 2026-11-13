@@ -52,6 +52,7 @@ class Session:
     duration_s: float = 0.0
     end_reason: str = ""  # 스페이스바 / 무음 90초 / 다음 환자 신호 '들어오세요' / 끝인사 '안녕히 가세요'
     auto_continued: bool = False  # 자동 나누기로 이어서 시작된 진료
+    via_hotkey: bool = False  # 녹음 버튼(전역 단축키)으로 시작·종료한 진료: 요약이 끝나면 자동으로 복사한다 (저장하지 않음)
     transcribe_error: str | None = None
     transcribe_seconds: float = 0.0
     summary_seconds: float = 0.0

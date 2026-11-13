@@ -238,6 +238,11 @@ class Settings:
     speaker_model: str = ""
     speaker_threshold: float = 0.55  # 등록 목소리와의 유사도가 이 이상이면 그 의사로 본다
     split_doctor_only: bool = True  # 신호 단어는 등록한 의사 목소리일 때만 진료를 나눈다
+    # 녹음 버튼(전역 단축키, hotkey.py): 씨차트 등 다른 프로그램이 앞에 있어도 이 키로 녹음 시작·종료
+    hotkey_enabled: bool = True
+    record_hotkey: str = "F13"  # USB 버튼·풋페달이 보내게 정한 키 (Qt 표기)
+    hotkey_sounds: bool = True  # 버튼으로 시작·종료할 때 소리
+    auto_copy_summary: bool = True  # 버튼으로 녹음한 진료는 요약이 끝나면 클립보드에 복사 (씨차트에서 Ctrl+V)
     # GitHub 에 올라온 새 버전 중 테스트를 통과한 버전을 받아 두었다가 앱을 열 때 적용한다 (updater.py)
     auto_update: bool = True
 

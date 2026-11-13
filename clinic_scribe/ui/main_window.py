@@ -3,7 +3,9 @@
 화면 두 개를 함께 쓴다.
 - 간단 화면(기본): 큰 녹음 버튼·경과 시간·상태와 진료 기록 목록만 보인다. 대화 내용·요약은 눌러야 펼쳐진다.
 - 개발자 대시보드: 입력 파형, 진행 단계, 음성 구간 타임라인, 실시간/최종 전사, 음성 구간, VAD 비교, 요약.
-스페이스바로 녹음을 시작·종료한다. 녹음 중 긴 침묵이나 다음 환자 신호("들어오세요" 등)가 나오면
+스페이스바로 녹음을 시작·종료한다. 녹음 버튼(전역 단축키, 기본 F13)은 씨차트 등 다른 프로그램이 앞에 있어도 녹음을 시작·종료하고,
+화면 구석의 작은 표시창과 소리로 알리며, 그렇게 녹음한 진료는 요약이 끝나면 클립보드에 복사한다.
+녹음 중 긴 침묵이나 다음 환자 신호("들어오세요" 등)가 나오면
 그 진료를 끝내고 녹음은 이어서 다음 진료로 넘어간다(자동 진료 나누기). 진료마다 따로 전사·요약한다.
 진료 기록(무음을 줄인 녹음 · 전사문 · 요약)은 저장소(records.py)에 저장되어 앱을 다시 열어도 남고, 지울 수 있다.
 """
@@ -11,6 +13,8 @@
 from __future__ import annotations
 
 import html
+import os
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -51,6 +55,7 @@ from PySide6.QtWidgets import (
 )
 
 from clinic_scribe import installer, mic_permission, procutil, updater
+from clinic_scribe.hotkey import GlobalHotkey, HotkeyError, describe as describe_key
 from clinic_scribe.audio import WHISPER_SR, AudioFileError, load_audio_file, pcm_slice, rms_dbfs, to_mono, to_whisper_pcm
 from clinic_scribe.auto_split import find_cue, parse_cues
 from clinic_scribe.chart import ChartDraft, verify_draft
@@ -84,6 +89,7 @@ from clinic_scribe.ui.diction_dialog import CorrectionDialog
 from clinic_scribe.ui.settings_dialog import SettingsDialog
 from clinic_scribe.ui.setup_dialog import SetupDialog
 from clinic_scribe.ui.simple_view import HistoryRow, SimpleView, day_label
+from clinic_scribe.ui.record_overlay import RecordOverlay, play_cue
 from clinic_scribe.ui.tasks import Job, Task, TaskRunner
 from clinic_scribe.ui.updates import UpdateDialog, UpdateWatcher
 from clinic_scribe.ui.voice_dialog import VoiceDialog
@@ -172,11 +178,18 @@ class MainWindow(QMainWindow):
     # 전사/요약 처리가 끝날 때마다 "transcribe" / "summary" 를 보낸다 (자동 검증용).
     activity_finished = Signal(str)
     _record_error = Signal(str)  # 진료 기록 저장 실패 (저장 스레드에서 보낸다)
+    hotkey_pressed = Signal()  # 녹음 버튼 (Windows 는 단축키 스레드에서 보낸다)
 
     def __init__(self, settings: Settings, demo_file: Path | None = None, demo_speed: float = 1.0) -> None:
         super().__init__()
         self.settings = settings
         self.interactive = True  # False 면 확인 대화상자를 건너뛴다 (자동 검증용)
+        # 녹음 버튼: 씨차트를 보며 누를 때 화면 구석 표시창으로 상태를 알린다 (_refresh_controls 가 맞춘다)
+        self.overlay = RecordOverlay()
+        self._hotkey: GlobalHotkey | None = None
+        self.hotkey_issue = ""  # 단축키를 등록하지 못한 이유 (설정 창에 보인다)
+        self._hotkey_session: Session | None = None  # 버튼으로 마지막에 시작·종료한 진료
+        self._last_hotkey = 0.0
         self.recorder = Recorder()
         self.live = LiveActivityMonitor()
         self.live_transcriber = LiveTranscriber(self)
@@ -473,6 +486,10 @@ class MainWindow(QMainWindow):
         self.updates = UpdateWatcher(self.settings, self)
         self.updates.changed.connect(self._refresh_update_chip)
         self._refresh_update_chip()
+        self.overlay.clicked.connect(self._bring_to_front)
+        self.hotkey_pressed.connect(self._on_hotkey)
+        QApplication.instance().applicationStateChanged.connect(lambda _state: self._refresh_overlay())
+        self._apply_hotkey()
         # 전사문에서 틀린 말을 골라 오른쪽 클릭 → 고쳐 쓰기 (딕션 사전에 쌓인다)
         for view in (self.transcript_view, self.simple.transcript_view):
             view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -812,6 +829,7 @@ class MainWindow(QMainWindow):
             can_delete=s is not None and not live_session,
             can_name=s is not None,
         )
+        self._refresh_overlay()
         stale = s is not None and s.summary_stale and s.draft is not None and not s.summary_error
         # 전사가 실패했거나 전사 도중 앱이 꺼진 기록은 저장된 녹음으로 다시 전사한다
         retranscribe = (s is not None and not s.runs and bool(s.transcribe_error) and has_audio
@@ -1505,6 +1523,7 @@ class MainWindow(QMainWindow):
         started = (self._recording_started or datetime.now()) + timedelta(seconds=boundary)
         nxt = self._create_session(rec.source, boundary, started)
         nxt.auto_continued = True
+        nxt.via_hotkey = rec.via_hotkey  # 버튼으로 시작한 녹음에서 나뉜 진료도 요약이 끝나면 복사한다
         self._recording_session = nxt
         self._live_entries.append(LiveEntry(
             clip_id=-1, start=boundary, status="split",
@@ -2012,6 +2031,8 @@ class MainWindow(QMainWindow):
                 )
                 if shown:
                     self._set_status("요약 실패 · 전사문은 그대로 있습니다", "warn")
+                if session.via_hotkey:
+                    self.overlay.show_status("error", "요약하지 못했습니다", "clinic-scribe 화면을 확인하세요", 20)
         else:
             session.draft = draft
             session.draft_run_id = job.run_id
@@ -2019,6 +2040,7 @@ class MainWindow(QMainWindow):
             session.summary_stale = False
             if shown:
                 self._set_status(f"완료 · {draft.kind_label} 준비됨", "done")
+            self._copy_hotkey_summary(session)
         if shown:
             self._show_draft()
 
@@ -2254,6 +2276,99 @@ class MainWindow(QMainWindow):
         self._refresh_engine_texts()
         self._refresh_controls()
 
+    # -------------------------------------------------------------- 녹음 버튼 (전역 단축키)
+    def _apply_hotkey(self) -> None:
+        """설정대로 녹음 버튼을 (다시) 등록한다. 쓸 수 없는 키면 이유를 hotkey_issue 에 두고 스페이스바만 쓴다."""
+        if self._hotkey is not None:
+            self._hotkey.stop()
+            self._hotkey = None
+        self.hotkey_issue = ""
+        if not self.settings.hotkey_enabled or os.environ.get("CLINIC_SCRIBE_NO_HOTKEY"):
+            self._refresh_hint()
+            return
+        try:
+            hotkey = GlobalHotkey(self.settings.record_hotkey, self.hotkey_pressed.emit)
+            hotkey.start()
+        except (HotkeyError, ValueError) as exc:
+            self.hotkey_issue = str(exc)
+        else:
+            self._hotkey = hotkey
+        self._refresh_hint()
+
+    def _hotkey_label(self) -> str:
+        try:
+            return describe_key(self.settings.record_hotkey)
+        except ValueError:
+            return self.settings.record_hotkey
+
+    def _refresh_hint(self) -> None:
+        active = self._hotkey is not None
+        self.simple.hint.setText(f"녹음 시작 · 종료  ·  버튼 {self._hotkey_label()}" if active else "녹음 시작 · 종료")
+
+    def _on_hotkey(self) -> None:
+        """녹음 버튼: 녹음 중이 아니면 시작, 녹음 중이면 끝내고 전사·요약. 버튼이 튀어 두 번 눌린 것(0.8초 안)은 한 번으로."""
+        now = time.monotonic()
+        if now - self._last_hotkey < 0.8:
+            return
+        self._last_hotkey = now
+        sounds = self.settings.hotkey_sounds
+        if self.recorder.active:
+            session = self._recording_session
+            if session is not None:
+                session.via_hotkey = True
+                self._hotkey_session = session
+            self._on_record_clicked()
+            if sounds:
+                play_cue("stop")
+        else:
+            self._on_record_clicked()
+            if self.recorder.active and self._recording_session is not None:
+                self._recording_session.via_hotkey = True
+                self._hotkey_session = self._recording_session
+                if sounds:
+                    play_cue("start")
+            else:
+                if sounds:
+                    play_cue("error")
+                self.overlay.show_status("error", "녹음을 시작하지 못했습니다", "clinic-scribe 화면을 확인하세요", 12)
+        self._refresh_overlay()
+
+    def _refresh_overlay(self) -> None:
+        """화면 구석 표시창: 녹음 중이거나 버튼으로 녹음한 진료를 처리하는 동안 (clinic-scribe 창을 보고 있으면 숨는다)."""
+        overlay = getattr(self, "overlay", None)
+        if overlay is None:
+            return
+        overlay.set_allowed(QApplication.applicationState() != Qt.ApplicationState.ApplicationActive)
+        if self.recorder.active and self._recording_started is not None:
+            key = f"{self._hotkey_label()} 버튼을 다시 누르면 끝" if self._hotkey is not None else "Space 를 누르면 끝"
+            overlay.show_recording(self._recording_started, key)
+            return
+        sess = self._hotkey_session
+        if sess is not None and self._session_by_id(sess.session_id) is sess:
+            name = sess.patient or f"진료 #{sess.session_id}"
+            if self._task(sess, "transcribe"):
+                overlay.show_status("busy", "전사 중…", name)
+                return
+            if self._task(sess, "summary"):
+                overlay.show_status("busy", "요약 중…", name)
+                return
+        overlay.clear()
+
+    def _bring_to_front(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _copy_hotkey_summary(self, session: Session) -> None:
+        """버튼으로 녹음한 진료의 요약이 끝났다: 클립보드에 복사하고 표시창·소리로 알린다 (씨차트에서 Ctrl+V)."""
+        if not (session.via_hotkey and self.settings.auto_copy_summary and session.draft is not None):
+            return
+        QGuiApplication.clipboard().setText(session.draft.to_text(include_evidence=self.evidence_check.isChecked()))
+        name = session.patient or f"진료 #{session.session_id}"
+        self.overlay.show_status("done", "요약을 복사했습니다", f"{name} · 씨차트에서 Ctrl+V", 20)
+        if self.settings.hotkey_sounds:
+            play_cue("done")
+
     # -------------------------------------------------------------- 업데이트
     def _refresh_update_chip(self) -> None:
         chip = self.updates.chip()
@@ -2282,8 +2397,11 @@ class MainWindow(QMainWindow):
         self.close()
 
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(self.settings, self)
+        dialog = SettingsDialog(self.settings, self, hotkey_issue=self.hotkey_issue)
         dialog.setStyleSheet(theme.stylesheet("SettingsDialog"))
+        if self._hotkey is not None:  # 설정 창에서 버튼을 눌러 키를 정할 수 있게 잠시 푼다 (닫으면 다시 등록)
+            self._hotkey.stop()
+            self._hotkey = None
         dialog.setup_requested.connect(lambda: (dialog.reject(), QTimer.singleShot(0, self._open_setup)))
         dialog.update_requested.connect(lambda: (dialog.reject(), QTimer.singleShot(0, self._open_updates)))
         if dialog.exec():
@@ -2295,6 +2413,7 @@ class MainWindow(QMainWindow):
             self.summary_mode_combo.setCurrentIndex(max(0, self.summary_mode_combo.findData(self.settings.summary_mode)))
             self._refresh_tool_status()
             self._refresh_auto_split_note()
+        self._apply_hotkey()
 
     # -------------------------------------------------------------- 종료
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
@@ -2317,6 +2436,10 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
+        if self._hotkey is not None:
+            self._hotkey.stop()
+            self._hotkey = None
+        self.overlay.hide()
         self._rec_timer.stop()
         if self.recorder.active:
             self.recorder.abort()

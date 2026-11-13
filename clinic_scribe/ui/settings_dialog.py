@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -12,6 +13,8 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
@@ -30,7 +33,7 @@ from clinic_scribe.config import (
     default_model_dir,
     settings_path,
 )
-from clinic_scribe import emr_probe, installer, updater
+from clinic_scribe import emr_probe, hotkey, installer, updater
 from clinic_scribe.ui import theme
 from clinic_scribe.ui.emr_probe_dialog import EmrProbeDialog
 from clinic_scribe.ui.widgets import PathField
@@ -40,10 +43,11 @@ class SettingsDialog(QDialog):
     setup_requested = Signal()  # '설치 · 요약 방식…' 을 눌렀다 (메인 창이 설치 창을 연다)
     update_requested = Signal()  # '업데이트 확인…' 을 눌렀다 (메인 창이 업데이트 창을 연다)
 
-    def __init__(self, settings: Settings, parent=None) -> None:
+    def __init__(self, settings: Settings, parent=None, hotkey_issue: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("설정")
         self.settings = settings
+        self._hotkey_issue = hotkey_issue  # 메인 창이 지금 키를 등록하지 못한 이유
         s = settings
 
         whisper_box = QGroupBox("전사 (whisper.cpp, 이 컴퓨터에서 처리)")
@@ -159,7 +163,7 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         pages = [(whisper_box, "전사"), (claude_box, "요약"), (split_box, "진료 나누기"), (speaker_box, "말한 사람"),
-                 (self._update_box(), "업데이트")]
+                 (self._button_box(), "녹음 버튼"), (self._update_box(), "업데이트")]
         if emr_probe.supported():  # 씨차트는 Windows 프로그램
             pages.append((self._emr_box(), "씨차트"))
         # 항목이 많아 작은 화면에서도 잘리지 않게 탭으로 나눈다.
@@ -174,6 +178,59 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs, 1)
         layout.addWidget(info)
         layout.addWidget(buttons)
+
+    def _button_box(self) -> QGroupBox:
+        s = self.settings
+        box = QGroupBox("녹음 버튼 (씨차트를 보면서 버튼 하나로 녹음)")
+        form = QFormLayout(box)
+        self.hotkey_enabled = QCheckBox("버튼(단축키)으로 녹음 시작·종료 — 씨차트 등 다른 프로그램이 앞에 있어도 동작")
+        self.hotkey_enabled.setChecked(s.hotkey_enabled)
+        form.addRow("", self.hotkey_enabled)
+        key_row = QHBoxLayout()
+        self.hotkey_edit = QKeySequenceEdit(QKeySequence(s.record_hotkey))
+        self.hotkey_edit.setMaximumSequenceLength(1)
+        self.hotkey_edit.setToolTip("이 칸을 누르고 USB 버튼(또는 정할 키)을 누르면 그 키로 정합니다")
+        self.hotkey_edit.keySequenceChanged.connect(lambda _seq: self._check_hotkey())
+        key_row.addWidget(self.hotkey_edit, 1)
+        default_key = QPushButton(f"기본값 ({hotkey.DEFAULT_KEY})")
+        default_key.clicked.connect(lambda: self.hotkey_edit.setKeySequence(QKeySequence(hotkey.DEFAULT_KEY)))
+        key_row.addWidget(default_key)
+        form.addRow("버튼 키", key_row)
+        self.hotkey_status = QLabel()
+        self.hotkey_status.setWordWrap(True)
+        form.addRow("", self.hotkey_status)
+        self.hotkey_sounds = QCheckBox("버튼으로 시작·종료할 때 소리 내기 (화면을 보지 않아도 눌렸는지 알게)")
+        self.hotkey_sounds.setChecked(s.hotkey_sounds)
+        form.addRow("", self.hotkey_sounds)
+        self.auto_copy = QCheckBox("버튼으로 녹음한 진료는 요약이 끝나면 클립보드에 복사 (씨차트 진료 기록 칸에서 Ctrl+V)")
+        self.auto_copy.setChecked(s.auto_copy_summary)
+        form.addRow("", self.auto_copy)
+        guide = QLabel(
+            "USB 버튼·풋페달은 보통 전용 프로그램으로 누를 때 보낼 키를 정합니다. F13 처럼 키보드에 없는 키로 정하면 다른 "
+            "프로그램과 겹치지 않습니다. 버튼으로 녹음하는 동안 화면 오른쪽 위에 작은 표시창이 떠 녹음·요약 상태를 알려 줍니다."
+        )
+        guide.setObjectName("subtle")
+        guide.setWordWrap(True)
+        form.addRow("", guide)
+        self._check_hotkey()
+        return box
+
+    def _hotkey_text(self) -> str:
+        return self.hotkey_edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+
+    def _check_hotkey(self) -> bool:
+        """정한 키를 쓸 수 있는지 바로 보여 준다."""
+        text = self._hotkey_text()
+        try:
+            hotkey.parse(text)
+        except ValueError as exc:
+            self.hotkey_status.setText(str(exc))
+            self.hotkey_status.setStyleSheet("color: #f87171; font-size: 12px;")
+            return False
+        issue = self._hotkey_issue if text == self.settings.record_hotkey else ""
+        self.hotkey_status.setText(issue or f"버튼을 누르면 이 키({hotkey.describe(text)})가 들어오게 정해 두세요.")
+        self.hotkey_status.setStyleSheet(f"color: {'#fdba74' if issue else '#8b93a1'}; font-size: 12px;")
+        return True
 
     def _update_box(self) -> QGroupBox:
         box = QGroupBox("업데이트 (GitHub 의 새 버전)")
@@ -244,3 +301,8 @@ class SettingsDialog(QDialog):
         s.speaker_model = self.speaker_model.text()
         s.speaker_threshold = round(self.speaker_threshold.value(), 2)
         s.auto_update = self.auto_update.isChecked()
+        s.hotkey_enabled = self.hotkey_enabled.isChecked()
+        if self._check_hotkey():
+            s.record_hotkey = self._hotkey_text()
+        s.hotkey_sounds = self.hotkey_sounds.isChecked()
+        s.auto_copy_summary = self.auto_copy.isChecked()
