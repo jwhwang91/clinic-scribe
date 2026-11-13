@@ -9,7 +9,7 @@
   4) Claude Code CLI 확인 (요약용. 로그인 상태만 본다 — 전사문은 보내지 않는다)
   5) whisper.cpp 자체 점검 (만든 소리로 실제 전사·음성 구간 탐지 한 번)
   6) Linux: 필요한 시스템 라이브러리·한글 글꼴 확인 (sudo 가 필요한 설치는 명령만 알려 준다)
-  7) 클릭해서 여는 바로 가기 (Windows: 시작 메뉴·바탕 화면, Linux: 앱 목록, macOS: scripts/make_launcher.sh)
+  7) 클릭해서 여는 바로 가기 (Windows: 시작 메뉴·바탕 화면, Linux: 앱 목록, macOS: ~/Applications 의 앱 아이콘)
 
 막힌 단계가 있어도 나머지는 계속하고, 마지막에 막힌 단계와 직접 실행할 명령을 보여 준다(종료 코드 1).
 사용: python scripts/setup.py [--no-launcher]   (보통은 setup_macos.sh · setup_linux.sh · setup_windows.bat 로 실행)
@@ -242,10 +242,10 @@ def check_linux(report: Report) -> None:
     report.block(f"시스템 꾸러미가 없음: {names}", f"{command} && {rerun_command()}")
 
 
-# ---------------------------------------------------------------- 7) 바로 가기
+# ---------------------------------------------------------------- 7) 바로 가기 (macOS 는 앱 아이콘)
 def make_launcher(py: Path, report: Report) -> None:
     if os_key() == "darwin":
-        report.info("클릭해서 여는 앱 아이콘(응용 프로그램 폴더): ./scripts/make_launcher.sh")
+        make_mac_app(report)
         return
     folder = config.app_dir()
     folder.mkdir(parents=True, exist_ok=True)
@@ -264,6 +264,28 @@ def make_launcher(py: Path, report: Report) -> None:
         report.block(f"바로 가기를 만들지 못함 ({exc})", config.run_command() + "   # 터미널에서 열기")
         return
     report.ok(f"바로 가기: {where}")
+
+
+def make_mac_app(report: Report) -> None:
+    """macOS: 클릭해서 여는 앱 아이콘 ~/Applications/clinic-scribe.app (scripts/make_launcher.sh).
+
+    이 repo 를 여는 앱이 이미 있으면 그대로 둔다: 다시 만들면 macOS 가 마이크 권한을 한 번 더 묻는다.
+    """
+    app = Path.home() / "Applications" / "clinic-scribe.app"
+    binary = app / "Contents" / "MacOS" / "clinic-scribe"
+    try:
+        same_repo = binary.is_file() and str(REPO).encode() in binary.read_bytes()
+    except OSError:
+        same_repo = False
+    if same_repo:
+        report.ok(f"앱 아이콘 재사용: {app}")
+        return
+    made = subprocess.run(["bash", str(REPO / "scripts" / "make_launcher.sh")], capture_output=True, text=True, check=False)
+    if made.returncode != 0:
+        reason = ((made.stderr or made.stdout).strip().splitlines() or ["알 수 없는 오류"])[-1]
+        report.block(f"앱 아이콘을 만들지 못함: {reason}", "./scripts/make_launcher.sh")
+        return
+    report.ok(f"앱 아이콘: {app} (Spotlight 에서 'clinic' 으로 찾거나 Dock 에 끌어다 두세요)")
 
 
 def windows_shortcuts(py: Path, icon: Path) -> str:
@@ -370,8 +392,8 @@ def main(argv: list[str] | None = None) -> int:
         state = "(검증됨)" if models[item.name] else "(없음)"
         print(f"  {item.name}: {state}")
     if not report.blocked:
-        print(f"\n설치 완료. 앱 실행: {config.run_command()}" + ("" if args.no_launcher or os_key() == "darwin"
-                                                            else " 또는 바로 가기 'clinic-scribe'"))
+        print(f"\n설치 완료. 앱 실행: {config.run_command()}" + ("" if args.no_launcher
+                                                            else " 또는 앱 아이콘·바로 가기 'clinic-scribe'"))
         return 0
     print("\n막힌 단계가 있습니다. 아래 명령을 직접 실행한 뒤 이 설치를 다시 실행하세요.")
     for i, (step, command) in enumerate(report.blocked, 1):

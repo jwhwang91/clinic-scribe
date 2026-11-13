@@ -28,6 +28,7 @@
 | **진료 기록** | **이 Mac** (`~/Library/Application Support/clinic-scribe/records`) | 진료마다 무음을 줄인 녹음(FLAC) · 전사문 · 요약을 자동 저장. 앱을 다시 열어도 남고, `진료 기록` 에서 지움. 자동으로 지우지는 않음 |
 | 내보내기 | 사용자가 `내보내기…` 를 고른 경로 | 진료 기록과 별도로 .md (+ 녹음 .wav) 파일로 저장 |
 | 씨차트 연결 점검 (Windows) | 이 컴퓨터 | 씨차트 화면의 글자를 읽기만 함. 적은 환자 이름은 메모리에서만 쓰고, 결과·결과 파일에는 가려 적음. 외부 전송 없음 |
+| 자동 업데이트 | GitHub (받기만) | 새 코드와 테스트 결과를 받기만 함. 진료 정보는 보내지 않음 |
 
 - 검증과 테스트에는 **가상 진료 대화만** 쓰세요. 실제 환자 정보는 넣지 마세요.
 - 앱은 전사문·요약 원문을 콘솔이나 로그에 출력하지 않습니다(whisper-cli 표준출력도 버림).
@@ -47,13 +48,42 @@
 - 요약을 Claude Code 로 하면 [Claude Code](https://claude.com/claude-code) CLI 와 로그인 — '설치' 창이 공식 설치 프로그램으로 설치해 줍니다(로그인만 직접). 로컬 모델로 하면 필요 없습니다.
 - Windows·Linux 는 실제 컴퓨터 대신 GitHub 의 Windows·Linux 컴퓨터에서 설치·테스트를 돌려 확인합니다(아래 [테스트](#테스트)).
 
-## 설치
+## 설치 (새 컴퓨터)
+
+**1. 준비** (한 번)
+
+| OS | 설치할 것 |
+| --- | --- |
+| macOS | [Homebrew](https://brew.sh) 를 설치한 뒤 `brew install python@3.12 git` |
+| Windows | `winget install Python.Python.3.12 Git.Git` (또는 python.org · git-scm.com 설치 프로그램. Python 은 `Add python.exe to PATH` 체크) |
+| Linux | `sudo apt install python3 python3-venv git` (Fedora 는 `dnf`) |
+
+**2. 받기** — 원하는 폴더에서. 자동 업데이트를 하려면 ZIP 이 아니라 `git clone` 으로 받아야 합니다.
+
+```bash
+git clone https://github.com/jwhwang91/clinic-scribe.git
+cd clinic-scribe
+```
+
+**3. 설치 스크립트** (whisper.cpp·모델 약 0.6GB 를 받아 10~20분)
 
 | OS | 명령 (repo 폴더에서) |
 | --- | --- |
 | macOS | `./scripts/setup_macos.sh` |
 | Linux | `./scripts/setup_linux.sh` |
 | Windows | `scripts\setup_windows.bat` (탐색기에서 두 번 클릭해도 됨) |
+
+**4. 처음 열기** — macOS 는 Spotlight(⌘ Space → `clinic`), Windows 는 시작 메뉴·바탕 화면의 `clinic-scribe`.
+'설치' 창에서 요약 방식(Claude Code 또는 로컬 모델)을 고릅니다. Claude Code 는 처음 한 번 로그인합니다(`claude auth login`).
+
+**5. (선택) 쓰던 컴퓨터에서 옮기기** — 두 컴퓨터 모두 앱을 닫고, 쓰던 컴퓨터의 `<데이터>` 폴더를 새 컴퓨터의 같은 자리에 통째로 복사합니다
+(위치는 아래 [모델과 파일 위치](#모델과-파일-위치)). 등록한 의사 목소리·딕션 사전·설정·진료 기록이 그대로 옮겨집니다.
+옮기지 않으면 새 컴퓨터에서 의사 목소리를 다시 등록하면 됩니다. 의사 목소리 특징값과 진료 기록은 민감한 정보이니 USB 등으로 옮긴 뒤 복사본을 지우세요.
+`<캐시>/models` 도 복사하면 모델을 다시 받지 않습니다.
+
+**6. 자동 업데이트** — 따로 할 것이 없습니다. 아래 [자동 업데이트](#자동-업데이트) 참고.
+
+### 설치 스크립트가 하는 일
 
 세 스크립트는 맞는 Python(3.13→3.10)을 찾아 OS 공통 `scripts/setup.py` 를 실행합니다. 하는 일:
 
@@ -63,7 +93,7 @@
 4. `claude` 와 로그인 상태 확인(전사문은 보내지 않음), 이 컴퓨터 사양과 로컬 모델별로 돌아가는지 표시. `--local-model qwen3-8b` 처럼 주면 로컬 모델도 받습니다.
 5. whisper.cpp 자체 점검: 만든 소리로 전사와 음성 구간 탐지를 실제로 한 번 돌림
 6. Linux: 마이크(PortAudio)·화면(Qt xcb)·한글 글꼴이 있는지 확인하고 없으면 `sudo apt install …` 명령을 알려 줌 (sudo 는 직접 실행)
-7. 클릭해서 여는 바로 가기: Windows 는 시작 메뉴·바탕 화면, Linux 는 앱 목록. macOS 는 `./scripts/make_launcher.sh` (아래 실행)
+7. 클릭해서 여는 바로 가기: Windows 는 시작 메뉴·바탕 화면, Linux 는 앱 목록, macOS 는 `~/Applications/clinic-scribe.app` (이 repo 를 여는 앱이 이미 있으면 그대로 둠)
 
 설치나 다운로드가 막혀도 나머지 단계는 계속하고, 마지막에 막힌 단계와 직접 실행할 정확한 명령을 출력합니다(종료 코드 1).
 
@@ -84,13 +114,9 @@
 
 - **Windows**: 설치 스크립트가 만든 **시작 메뉴·바탕 화면의 `clinic-scribe`** (콘솔 창 없이 열림, 작업 표시줄에 앱 아이콘)
 - **Linux**: 설치 스크립트가 만든 **앱 목록의 `clinic-scribe`** (`~/.local/share/applications/clinic-scribe.desktop`)
-- **macOS**: 한 번만 만들어 두면 됩니다.
+- **macOS**: 설치 스크립트가 `~/Applications/clinic-scribe.app` 을 만듭니다(직접 만들려면 `./scripts/make_launcher.sh`).
 
-```bash
-./scripts/make_launcher.sh        # macOS: ~/Applications/clinic-scribe.app 을 만든다
-```
-
-- 그다음부터는 **Spotlight(⌘ Space → `clinic`) → Enter**, 또는 Launchpad·Finder(홈 폴더 → 응용 프로그램)에서 `clinic-scribe` 를 클릭합니다. Dock 에 끌어다 두면 Dock 아이콘으로 엽니다.
+- **Spotlight(⌘ Space → `clinic`) → Enter**, 또는 Launchpad·Finder(홈 폴더 → 응용 프로그램)에서 `clinic-scribe` 를 클릭합니다. Dock 에 끌어다 두면 Dock 아이콘으로 엽니다.
 - 앱은 이 repo 의 가상환경으로 `python -m clinic_scribe` 를 그대로 실행합니다(`scripts/launcher.c`). Dock·메뉴 막대에 `clinic-scribe` 로 보이고, 마이크 권한도 `clinic-scribe` 앱으로 묻습니다(처음 녹음할 때 한 번 `허용`).
 - repo 를 옮겼거나 가상환경을 다시 만들었으면 `./scripts/make_launcher.sh` 를 다시 실행하세요(그러면 마이크 권한을 한 번 더 묻습니다). 지우려면 앱을 휴지통으로 옮기면 됩니다.
 - 열리지 않으면 이유를 알리는 경고창이 뜹니다. 자세한 오류는 터미널에서 `./scripts/run.sh` 로 실행하면 보입니다.
@@ -210,6 +236,30 @@ clinic-scribe  녹음 · 전사 · 요약         [MacBook Pro 마이크 ⌄]  �
   가상 진료(환자가 말한 세부 정보 14개)를 Claude 로 요약하면 14개가 모두 각각의 항목으로 남습니다(`설사 5회`, `물처럼 나옴`, `초록빛`, `출근해도 되는지 질문`).
 - 잘못 들린 말을 요약이 알아서 고치지는 않습니다: 그럴듯하게 잘못 고치는 것을 막으려고 `확인 필요` 에 남깁니다.
   고치는 것은 딕션 사전(따라 읽기 학습, 전사문에서 고쳐 쓰기)이 맡고, 고친 말은 다음 진료부터 자동으로 적용됩니다.
+
+## 자동 업데이트
+
+GitHub 의 `main` 에 새 버전이 올라오면, 설치한 컴퓨터가 알아서 받아 둡니다. 받아 둔 버전은 앱을 다시 열 때 적용됩니다.
+
+- **테스트를 통과한 버전만** 받습니다. GitHub Actions 의 Windows·Linux·macOS 테스트(`tests`)가 모두 성공한 커밋 가운데 가장 새 것을 받습니다.
+  테스트 중이거나 실패한 버전은 기다리거나 건너뜁니다. 그래서 고장 난 버전이 진료실 컴퓨터에 깔리지 않습니다.
+- **언제**: 앱이 열려 있으면 30분마다(처음은 연 지 1분 뒤) 확인합니다. 새 버전을 받아 두면 위쪽에 `새 버전` 단추가 나옵니다.
+  - 눌러서 바뀐 것을 보고 `다시 열어 적용` 을 누르거나, 앱을 닫았다 다시 열면 적용됩니다.
+  - 녹음·전사·요약 중에는 `다시 열어 적용` 을 누를 수 없습니다.
+- **적용**: 앱을 열 때 화면이 뜨기 전에 `git` 으로 그 버전에 맞춥니다(fast-forward).
+  - `requirements.txt` 가 바뀌었으면 가상환경 패키지도 맞춥니다. 그때 몇십 초 더 걸릴 수 있습니다.
+  - 설치에 실패하면 이전 버전으로 엽니다.
+- **되돌리기**: 새 버전이 창을 띄우지 못하고 끝나면, 다음에 열 때 이전 버전으로 되돌립니다. 그 버전은 다시 받지 않습니다.
+  위쪽에 `업데이트 되돌림` 이 보입니다.
+- **건드리지 않는 경우**:
+  - ZIP 으로 받은 폴더(git 아님)
+  - `main` 이 아닌 브랜치
+  - 이 컴퓨터에서 고친 파일이 있을 때(개발 중인 컴퓨터)
+  - GitHub 과 기록이 갈라졌을 때
+  - 인터넷이 안 될 때
+- **끄기**: `설정 → 업데이트` 에서 끌 수 있습니다. 껐을 때도 `업데이트 확인…` → `다시 열어 적용` 으로 직접 적용할 수 있습니다.
+- GitHub 에서 코드와 테스트 결과만 받고, 진료 정보는 보내지 않습니다. 진료 기록·설정·의사 목소리·모델은 repo 밖에 있어 업데이트해도 그대로입니다.
+  상태는 `<데이터>/update.json` 에 남습니다.
 
 ## 진료 기록 (저장·삭제)
 
@@ -557,9 +607,11 @@ clinic_scribe/
   export.py               내보내기 (.md / .wav)
   procutil.py             외부 프로세스 실행·취소·종료 정리
   emr_probe.py            씨차트 연결 점검: Windows 화면 읽기로 환자 이름이 있는 자리 찾기·가리기·결과 파일
+  updater.py              자동 업데이트: 테스트를 통과한 새 버전 받기 · 열 때 적용 · 창을 못 띄우면 되돌리기
   ui/                     PySide6 화면 (simple_view = 간단 화면, main_window = 개발자 보기·전체 흐름, theme = 공통 어두운 디자인,
                           voice_dialog = 의사 목소리 등록, training_panel = 따라 읽기, diction_dialog = 딕션 사전·고쳐 쓰기,
-                          setup_dialog = '설치' 창: 빠진 것 받기·요약 방식·로컬 모델, emr_probe_dialog = 씨차트 연결 점검)
+                          setup_dialog = '설치' 창: 빠진 것 받기·요약 방식·로컬 모델, emr_probe_dialog = 씨차트 연결 점검,
+                          updates = 새 버전 확인·업데이트 창)
 scripts/  setup.py (OS 공통 설치) · setup_macos.sh · setup_linux.sh · setup_windows.bat · run.sh · run.bat
           make_launcher.sh + launcher.c (macOS 앱 아이콘) · make_test_audio.py · bench_ollama.py(실험)
 .github/workflows/tests.yml   Windows·Linux 에서 설치·전체 테스트·종료 점검, macOS 에서 설치·모델 없는 테스트

@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication
 
-from clinic_scribe import mic_permission
+from clinic_scribe import mic_permission, updater
 from clinic_scribe.config import Settings
 from clinic_scribe.ui import theme
 from clinic_scribe.ui.main_window import MainWindow
@@ -70,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         settings.summary_mode = args.summary
     window = MainWindow(settings, demo_file=args.demo, demo_speed=args.demo_speed)  # 창 크기는 화면 종류에 맞춘다
     window.show()
+    updater.mark_started()  # 새 버전으로 창이 떴다: 다음에 열 때 되돌리지 않는다
     # 새 컴퓨터 등에서 whisper·모델이 없거나 요약 방식을 아직 고르지 않았으면 '설치' 창을 띄운다
     QTimer.singleShot(0, window.check_setup)
 

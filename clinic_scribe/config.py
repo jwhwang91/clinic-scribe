@@ -237,6 +237,8 @@ class Settings:
     speaker_model: str = ""
     speaker_threshold: float = 0.55  # 등록 목소리와의 유사도가 이 이상이면 그 의사로 본다
     split_doctor_only: bool = True  # 신호 단어는 등록한 의사 목소리일 때만 진료를 나눈다
+    # GitHub 에 올라온 새 버전 중 테스트를 통과한 버전을 받아 두었다가 앱을 열 때 적용한다 (updater.py)
+    auto_update: bool = True
 
     # ---- 경로 해석 -------------------------------------------------------
     def whisper_model_path(self) -> Path:

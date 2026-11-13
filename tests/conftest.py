@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 테스트 중에 만든 앱 창이 GitHub 에 새 버전을 묻거나 repo 를 바꾸지 않게 (자동 업데이트 테스트는 이 값을 지운다)
+os.environ.setdefault("CLINIC_SCRIBE_NO_UPDATE", "1")
 
 REPO = Path(__file__).resolve().parent.parent
 SAMPLES = REPO / "samples"

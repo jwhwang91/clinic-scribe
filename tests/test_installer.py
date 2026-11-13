@@ -43,6 +43,36 @@ def test_setup_script_uses_the_same_catalog():
     assert module.MODELS is installer.MODELS and module.WHISPER_BUILDS is installer.WHISPER_BUILDS
 
 
+def test_setup_makes_the_mac_app_icon_once(tmp_path, monkeypatch):
+    """macOS 설치: 이 repo 를 여는 앱 아이콘이 없으면 만들고, 있으면 그대로 둔다 (다시 만들면 마이크 권한을 다시 묻는다)."""
+    import subprocess
+
+    spec = importlib.util.spec_from_file_location("setup_script", REPO / "scripts" / "setup.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    calls = []
+
+    def make(report):
+        with monkeypatch.context() as m:
+            m.setattr(module.subprocess, "run",
+                      lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
+            module.make_mac_app(report)
+
+    report = module.Report()
+    make(report)  # 앱이 없다: 만든다
+    assert calls and calls[-1][-1].endswith("make_launcher.sh") and not report.blocked
+    binary = tmp_path / "Applications" / "clinic-scribe.app" / "Contents" / "MacOS" / "clinic-scribe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"\0" + str(tmp_path / "other-repo").encode() + b"\0")
+    make(report)  # 다른 곳의 repo 를 여는 앱 (repo 를 옮김): 다시 만든다
+    assert len(calls) == 2
+    binary.write_bytes(b"\0" + str(REPO).encode() + b"\0")
+    make(report)  # 이 repo 를 여는 앱이 있다: 그대로
+    assert len(calls) == 2
+
+
 def specs(ram: float, metal: bool = False) -> Specs:
     return Specs("darwin" if metal else "win32", "arm64" if metal else "x64", "CPU", 8, ram, "Apple Metal" if metal else "", metal)
 

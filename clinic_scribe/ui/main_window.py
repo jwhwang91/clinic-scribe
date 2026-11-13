@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from clinic_scribe import installer, mic_permission, procutil
+from clinic_scribe import installer, mic_permission, procutil, updater
 from clinic_scribe.audio import WHISPER_SR, AudioFileError, load_audio_file, pcm_slice, rms_dbfs, to_mono, to_whisper_pcm
 from clinic_scribe.auto_split import find_cue, parse_cues
 from clinic_scribe.chart import ChartDraft, verify_draft
@@ -83,8 +83,18 @@ from clinic_scribe.ui.settings_dialog import SettingsDialog
 from clinic_scribe.ui.setup_dialog import SetupDialog
 from clinic_scribe.ui.simple_view import HistoryRow, SimpleView, day_label
 from clinic_scribe.ui.tasks import Job, Task, TaskRunner
+from clinic_scribe.ui.updates import UpdateDialog, UpdateWatcher
 from clinic_scribe.ui.voice_dialog import VoiceDialog
-from clinic_scribe.ui.widgets import BrandMark, LevelMeter, PipelineView, TimelineView, WaveformView, commit_typing
+from clinic_scribe.ui.widgets import (
+    BrandMark,
+    LevelMeter,
+    PipelineView,
+    TimelineView,
+    WaveformView,
+    commit_typing,
+    set_update_chip,
+    update_chip,
+)
 from clinic_scribe.whisper import (
     TranscriptionResult,
     WhisperConfig,
@@ -284,6 +294,9 @@ class MainWindow(QMainWindow):
         self.mic_status_label = QLabel()
         self.mic_status_label.setObjectName("micStatus")
         device_row.addWidget(self.mic_status_label)
+        self.update_btn = update_chip()
+        self.update_btn.clicked.connect(self._open_updates)
+        device_row.addWidget(self.update_btn)
         self.voices_btn = QPushButton("의사 목소리")
         self.voices_btn.setObjectName("ghost")
         self.voices_btn.setToolTip("의사 목소리를 등록하면 전사문의 발화마다 의사 이름이나 '환자'가 붙습니다.")
@@ -443,6 +456,11 @@ class MainWindow(QMainWindow):
         self.simple.voices_clicked.connect(self._open_voices)
         self.simple.developer_clicked.connect(lambda: self._set_view("developer"))
         self.simple.history_selected.connect(self._on_history_selected)
+        self.simple.update_clicked.connect(self._open_updates)
+        # 자동 업데이트: 새 버전(테스트 통과)을 받아 두면 위쪽 막대에 '새 버전' 단추가 나온다
+        self.updates = UpdateWatcher(self.settings, self)
+        self.updates.changed.connect(self._refresh_update_chip)
+        self._refresh_update_chip()
         # 전사문에서 틀린 말을 골라 오른쪽 클릭 → 고쳐 쓰기 (딕션 사전에 쌓인다)
         for view in (self.transcript_view, self.simple.transcript_view):
             view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2147,10 +2165,38 @@ class MainWindow(QMainWindow):
         self._refresh_engine_texts()
         self._refresh_controls()
 
+    # -------------------------------------------------------------- 업데이트
+    def _refresh_update_chip(self) -> None:
+        chip = self.updates.chip()
+        for button in (self.update_btn, self.simple.update_btn):
+            set_update_chip(button, chip)
+
+    def _can_restart(self) -> bool:
+        return not self.recorder.active and not self._tasks
+
+    def _open_updates(self) -> None:
+        dialog = UpdateDialog(self.updates, self._can_restart, self)
+        dialog.setStyleSheet(theme.stylesheet("UpdateDialog"))
+        dialog.restart_requested.connect(self._restart_for_update)
+        dialog.exec()
+        self.updates.acknowledge()
+
+    def _restart_for_update(self) -> None:
+        """'다시 열어 적용': 새 창을 띄우고 이 창을 닫는다. 새 창은 이 창이 닫히기를 기다렸다가 새 버전을 적용하고 연다."""
+        if not self._can_restart():
+            return
+        try:
+            updater.request_restart(apply=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "업데이트", f"앱을 다시 열지 못했습니다: {exc}\n앱을 닫았다가 직접 다시 열면 적용됩니다.")
+            return
+        self.close()
+
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)
         dialog.setStyleSheet(theme.stylesheet("SettingsDialog"))
         dialog.setup_requested.connect(lambda: (dialog.reject(), QTimer.singleShot(0, self._open_setup)))
+        dialog.update_requested.connect(lambda: (dialog.reject(), QTimer.singleShot(0, self._open_updates)))
         if dialog.exec():
             dialog.apply()
             self.settings.save()

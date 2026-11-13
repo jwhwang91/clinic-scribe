@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from clinic_scribe.ui.theme import ACCENT, DOCUMENT_STYLE, STATUS_COLORS, callout, pill, stylesheet, timer_font
-from clinic_scribe.ui.widgets import BrandMark
+from clinic_scribe.ui.widgets import BrandMark, update_chip
 
 # 간단 화면에만 있는 모양 (공통 모양은 theme)
 _EXTRA = """
@@ -299,6 +299,7 @@ class SimpleView(QWidget):
     settings_clicked = Signal()
     voices_clicked = Signal()
     developer_clicked = Signal()
+    update_clicked = Signal()
     history_selected = Signal(int)  # 진료 번호
     delete_requested = Signal(int)  # 지울 진료 번호 (-1: 지금 고른 진료)
 
@@ -365,6 +366,9 @@ class SimpleView(QWidget):
         self.mic_status = QLabel()
         self.mic_status.setObjectName("micStatus")
         row.addWidget(self.mic_status)
+        self.update_btn = update_chip()
+        self.update_btn.clicked.connect(self.update_clicked)
+        row.addWidget(self.update_btn)
         self.voices_btn = QPushButton("의사 목소리")
         self.voices_btn.setToolTip("의사 목소리를 등록하면 전사문의 발화마다 의사 이름이나 '환자'가 붙습니다.")
         self.voices_btn.clicked.connect(self.voices_clicked)

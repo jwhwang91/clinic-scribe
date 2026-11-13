@@ -1,5 +1,5 @@
 """설정 창: 실행 파일·모델 경로, Whisper 옵션, 요약(Claude Code CLI 또는 로컬 모델) 옵션, 진료 나누기, 말한 사람 표시,
-씨차트 연결 점검(Windows)."""
+자동 업데이트, 씨차트 연결 점검(Windows)."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from clinic_scribe.config import (
     default_model_dir,
     settings_path,
 )
-from clinic_scribe import emr_probe, installer
+from clinic_scribe import emr_probe, installer, updater
 from clinic_scribe.ui import theme
 from clinic_scribe.ui.emr_probe_dialog import EmrProbeDialog
 from clinic_scribe.ui.widgets import PathField
@@ -38,6 +38,7 @@ from clinic_scribe.ui.widgets import PathField
 
 class SettingsDialog(QDialog):
     setup_requested = Signal()  # '설치 · 요약 방식…' 을 눌렀다 (메인 창이 설치 창을 연다)
+    update_requested = Signal()  # '업데이트 확인…' 을 눌렀다 (메인 창이 업데이트 창을 연다)
 
     def __init__(self, settings: Settings, parent=None) -> None:
         super().__init__(parent)
@@ -157,7 +158,8 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
-        pages = [(whisper_box, "전사"), (claude_box, "요약"), (split_box, "진료 나누기"), (speaker_box, "말한 사람")]
+        pages = [(whisper_box, "전사"), (claude_box, "요약"), (split_box, "진료 나누기"), (speaker_box, "말한 사람"),
+                 (self._update_box(), "업데이트")]
         if emr_probe.supported():  # 씨차트는 Windows 프로그램
             pages.append((self._emr_box(), "씨차트"))
         # 항목이 많아 작은 화면에서도 잘리지 않게 탭으로 나눈다.
@@ -172,6 +174,28 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs, 1)
         layout.addWidget(info)
         layout.addWidget(buttons)
+
+    def _update_box(self) -> QGroupBox:
+        box = QGroupBox("업데이트 (GitHub 의 새 버전)")
+        layout = QVBoxLayout(box)
+        layout.setSpacing(10)
+        current = updater.version_of("HEAD")
+        version = QLabel(f"지금 버전: {current.describe()} — {current.subject}" if current else "지금 버전: 알 수 없음")
+        version.setWordWrap(True)
+        layout.addWidget(version)
+        self.auto_update = QCheckBox("새 버전을 자동으로 받기 (테스트를 모두 통과한 버전만, 앱을 다시 열 때 적용)")
+        self.auto_update.setChecked(self.settings.auto_update)
+        layout.addWidget(self.auto_update)
+        blocked = updater.blocker()
+        note = QLabel(blocked or "앱이 열려 있으면 30분마다 확인합니다. 녹음·처리 중에는 버전을 바꾸지 않고, 새 버전이 열리지 않으면 "
+                                 "이전 버전으로 되돌립니다. 진료 기록·설정·의사 목소리는 그대로 남습니다.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        check = QPushButton("업데이트 확인…")
+        check.clicked.connect(self.update_requested)
+        layout.addWidget(check, 0, Qt.AlignmentFlag.AlignLeft)
+        return box
 
     def _emr_box(self) -> QGroupBox:
         box = QGroupBox("씨차트 연결 (준비 중)")
@@ -219,3 +243,4 @@ class SettingsDialog(QDialog):
         s.split_doctor_only = self.split_doctor_only.isChecked()
         s.speaker_model = self.speaker_model.text()
         s.speaker_threshold = round(self.speaker_threshold.value(), 2)
+        s.auto_update = self.auto_update.isChecked()

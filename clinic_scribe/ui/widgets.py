@@ -1,4 +1,4 @@
-"""작은 위젯들: 앱 표시, 입력 레벨, 입력 파형, 음성 구간 타임라인, 진행 단계, 경로 입력칸."""
+"""작은 위젯들: 앱 표시, 입력 레벨, 입력 파형, 음성 구간 타임라인, 진행 단계, 경로 입력칸, 업데이트 단추."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from collections import deque
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QWidget
+
+from clinic_scribe.ui import theme
 
 
 def commit_typing(target: QWidget | None = None) -> None:
@@ -278,3 +280,23 @@ class PathField(QWidget):
 
     def text(self) -> str:
         return self.edit.text().strip()
+
+
+def update_chip() -> QPushButton:
+    """위쪽 막대의 업데이트 단추: 새 버전이 준비됐거나 방금 업데이트했을 때만 보인다 (set_update_chip)."""
+    button = QPushButton()
+    button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    button.setToolTip("업데이트: 새 버전은 테스트를 통과한 것만 받아 두었다가 앱을 다시 열 때 적용합니다.")
+    button.hide()
+    return button
+
+
+def set_update_chip(button: QPushButton, chip: tuple[str, str] | None) -> None:
+    if chip is None:
+        button.hide()
+        return
+    text, kind = chip
+    button.setText(text)
+    button.setStyleSheet(f"QPushButton {{ {theme.pill(kind, 12)} }}")
+    button.show()
+
