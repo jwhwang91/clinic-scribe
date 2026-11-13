@@ -21,6 +21,8 @@ def build_markdown(session: Session, run: TranscriptRun | None, draft: ChartDraf
         "",
         f"- 세션: {session.created_at:%Y-%m-%d %H:%M} · {session.source}",
     ]
+    if session.patient:
+        lines.append(f"- 환자: {session.patient}")
     if run is not None:
         r = run.result
         lines.append(f"- 전사: {run.label} · 녹음 길이 {format_time(r.audio_duration)}")

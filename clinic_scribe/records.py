@@ -1,7 +1,7 @@
 """진료 기록 저장소: 앱을 다시 열어도 진료 기록(무음을 줄인 녹음 · 전사문 · 요약)이 남는다.
 
 설정 파일과 같은 폴더의 records/ 에 둔다 (~/Library/Application Support/clinic-scribe/records, Git 밖, 이 컴퓨터 에만).
-  records.db          SQLite. 진료 하나가 한 줄: 번호·시각·길이·상태 + 전사문·요약(JSON)
+  records.db          SQLite. 진료 하나가 한 줄: 번호·시각·길이·상태·환자 이름 + 전사문·요약(JSON) + 검색용 글자
   audio/<번호>.flac   무음을 줄인 녹음 (16 kHz mono, 무손실 FLAC)
 진료 녹음·전사문은 민감 정보라 폴더는 700, 파일은 600 으로 만들고, 지운 기록은 DB 안에서도 0 으로 덮는다
 (secure_delete). 기록을 지우면 녹음 파일도 함께 지운다.
@@ -19,7 +19,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields, replace
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -34,7 +34,7 @@ from clinic_scribe.session import Session, TranscriptRun
 from clinic_scribe.speakers import main_doctor
 from clinic_scribe.whisper import SpeechRegion, TranscriptionResult, TranscriptSegment
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: 환자 이름(patient)·검색용 글자(search_text)
 # 이보다 긴 무음은 이 길이로 줄인다. 말 사이의 짧은 쉼은 그대로 두어 자연스럽게 들리고,
 # 줄인 녹음을 다시 전사해도 줄 나누기(1초 이상 쉬면 새 줄)가 같게 나온다.
 MAX_PAUSE_S = 1.2
@@ -59,12 +59,14 @@ CREATE TABLE IF NOT EXISTS records (
     audio TEXT,
     audio_s REAL NOT NULL DEFAULT 0,
     audio_trimmed INTEGER NOT NULL DEFAULT 0,
-    data TEXT NOT NULL DEFAULT '{}'
+    data TEXT NOT NULL DEFAULT '{}',
+    patient TEXT NOT NULL DEFAULT '',
+    search_text TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 """
 _COLUMNS = ("id", "created_at", "updated_at", "source", "duration_s", "end_reason", "status", "doctor", "pending",
-            "audio", "audio_s", "audio_trimmed", "data")
+            "audio", "audio_s", "audio_trimmed", "data", "patient", "search_text")
 
 
 class RecordError(Exception):
@@ -211,6 +213,45 @@ def apply_data(session: Session, data: dict) -> None:
     session.loaded = True
 
 
+def search_text(session: Session) -> str:
+    """검색용 글자: 요약과 마지막 전사문의 말 (환자·의사 이름과 날짜는 따로 찾는다)."""
+    parts = [session.draft.to_text(include_evidence=False)] if session.draft is not None else []
+    if session.runs:
+        parts.extend(seg.text for seg in session.runs[-1].result.segments)
+    return "\n".join(parts)
+
+
+def _search_text_from_data(raw: str) -> str:
+    session = Session(session_id=0, source="")
+    try:
+        apply_data(session, json.loads(raw))
+    except (ValueError, RecordError):
+        return ""
+    return search_text(session)
+
+
+def _compact(text: str) -> str:
+    return "".join(text.split()).lower()
+
+
+def date_keys(when: datetime, today: date) -> set[str]:
+    """날짜로 찾을 때 맞춰 보는 글자 (띄어쓰기 없이): 2026-11-12 · 20261112 · 11/12 · 11.12 · 11월12일 · 11월 · 12일 · 오늘."""
+    y, m, d = when.year, when.month, when.day
+    keys = {f"{y}-{m:02d}-{d:02d}", f"{y}{m:02d}{d:02d}", f"{y}.{m}.{d}", f"{y}.{m:02d}.{d:02d}", f"{m}/{d}",
+            f"{m:02d}/{d:02d}", f"{m}.{d}", f"{m}월{d}일", f"{y}년{m}월{d}일", f"{y}년{m}월", f"{m}월", f"{d}일"}
+    if when.date() == today:
+        keys.add("오늘")
+    elif when.date() == today - timedelta(days=1):
+        keys.add("어제")
+    return keys
+
+
+def record_matches(term: str, patient: str, doctor: str | None, when: datetime, today: date) -> bool:
+    """검색어 한 낱말이 환자 이름·의사 이름(띄어쓰기 무시)·날짜에 맞는가. 내용(요약·전사문)은 RecordStore.search_ids."""
+    t = _compact(term)
+    return bool(t) and (t in _compact(patient) or t in _compact(doctor or "") or t in date_keys(when, today))
+
+
 @dataclass
 class RecordRow:
     """목록에 보일 정보. 앱을 열 때는 이것만 읽고, 진료를 고르면 전사문·요약(data)을 읽는다."""
@@ -226,6 +267,7 @@ class RecordRow:
     audio: str | None
     audio_s: float
     audio_trimmed: bool
+    patient: str = ""
 
 
 def record_row(session: Session, status: str, pending: str = "") -> dict:
@@ -240,6 +282,8 @@ def record_row(session: Session, status: str, pending: str = "") -> dict:
         "doctor": main_doctor(session.runs[-1].result.segments) if session.runs else None,
         "pending": pending,
         "audio_trimmed": int(session.audio_trimmed),
+        "patient": session.patient,
+        "search_text": search_text(session),
     }
 
 
@@ -253,10 +297,22 @@ def session_from_row(row: RecordRow) -> Session:
     session.stored_status = _INTERRUPTED_STATUS.get(row.pending, row.status)
     session.stored_doctor = row.doctor
     session.stored_pending = row.pending
+    session.patient = row.patient
     return session
 
 
 # ---------------------------------------------------------------- 저장소
+def _add_patient_and_search(db: sqlite3.Connection) -> None:
+    """버전 1 기록: 환자 이름·검색용 글자 칸을 더하고, 저장된 요약·전사문으로 검색용 글자를 채운다."""
+    have = {row["name"] for row in db.execute("PRAGMA table_info(records)")}
+    if "patient" not in have:
+        db.execute("ALTER TABLE records ADD COLUMN patient TEXT NOT NULL DEFAULT ''")
+    if "search_text" not in have:
+        db.execute("ALTER TABLE records ADD COLUMN search_text TEXT NOT NULL DEFAULT ''")
+        for row in db.execute("SELECT id, data FROM records").fetchall():
+            db.execute("UPDATE records SET search_text = ? WHERE id = ?", (_search_text_from_data(row["data"]), row["id"]))
+
+
 class RecordStore:
     """SQLite 파일 하나 + 녹음 폴더. 부를 때마다 연결을 새로 열어 어느 스레드에서 불러도 된다."""
 
@@ -274,6 +330,8 @@ class RecordStore:
                 if version > SCHEMA_VERSION:
                     raise RecordError("더 새로운 버전의 clinic-scribe 가 만든 기록입니다. 앱을 업데이트하세요.")
                 db.executescript(_SCHEMA)
+                if version < 2:
+                    _add_patient_and_search(db)
                 db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             os.chmod(self.db_path, 0o600)
         except (OSError, sqlite3.Error) as exc:
@@ -305,7 +363,7 @@ class RecordStore:
             with self._db() as db:
                 rows = db.execute(
                     "SELECT id, created_at, source, duration_s, end_reason, status, doctor, pending, audio, audio_s,"
-                    " audio_trimmed FROM records ORDER BY created_at, id"
+                    " audio_trimmed, patient FROM records ORDER BY created_at, id"
                 ).fetchall()
         except sqlite3.Error as exc:
             raise RecordError(str(exc)) from exc
@@ -318,8 +376,25 @@ class RecordStore:
             out.append(RecordRow(id=r["id"], created_at=created, source=r["source"], duration_s=r["duration_s"],
                                  end_reason=r["end_reason"], status=r["status"], doctor=r["doctor"],
                                  pending=r["pending"], audio=r["audio"], audio_s=r["audio_s"],
-                                 audio_trimmed=bool(r["audio_trimmed"])))
+                                 audio_trimmed=bool(r["audio_trimmed"]), patient=r["patient"]))
         return out
+
+    def search_ids(self, term: str) -> set[int]:
+        """요약·전사문에 term 이 들어 있는 기록 번호 (영문은 대소문자 무시)."""
+        try:
+            with self._db() as db:
+                rows = db.execute("SELECT id FROM records WHERE instr(lower(search_text), lower(?)) > 0", (term,)).fetchall()
+        except sqlite3.Error as exc:
+            raise RecordError(str(exc)) from exc
+        return {int(r["id"]) for r in rows}
+
+    def set_patient(self, record_id: int, patient: str) -> None:
+        """목록만 읽은 기록의 환자 이름 (내용을 읽지 않고 고친다)."""
+        try:
+            with self._lock, self._db() as db:
+                db.execute("UPDATE records SET patient = ? WHERE id = ?", (patient, record_id))
+        except sqlite3.Error as exc:
+            raise RecordError(f"기록 #{record_id} 의 환자 이름을 저장하지 못했습니다: {exc}") from exc
 
     def load_data(self, record_id: int) -> dict:
         try:
@@ -433,6 +508,11 @@ class RecordSaver:
             if self.store is not None and not self._closed:
                 self._queue.put(("rename", old, new))
 
+    def set_patient(self, record_id: int, patient: str) -> None:
+        with self._lock:
+            if self.store is not None and not self._closed and record_id not in self._deleted:
+                self._queue.put(("patient", record_id, patient))
+
     def flush(self, timeout: float = 10.0) -> bool:
         """앞서 맡긴 저장·삭제가 끝날 때까지 기다린다."""
         done = threading.Event()
@@ -458,6 +538,8 @@ class RecordSaver:
                     self.store.delete(item[1])
                 elif item[0] == "rename":
                     self.store.rename_speaker(item[1], item[2])
+                elif item[0] == "patient":
+                    self.store.set_patient(item[1], item[2])
                 else:
                     _kind, row, data, audio = item
                     with self._lock:

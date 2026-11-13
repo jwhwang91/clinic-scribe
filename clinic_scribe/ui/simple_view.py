@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QVariantAnimation, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -58,11 +59,13 @@ class HistoryRow:
     status: str  # 예: "요약 준비됨"
     kind: str  # 상태 색 (STATUS_COLORS 의 키)
     note: str = ""  # 나눈 이유 등
-    day: str = ""  # 날짜 묶음 제목 (예: "오늘 · 11월 12일 (목)"). 바뀌는 곳마다 제목 줄이 들어간다
+    day: str = ""  # 묶음 제목 (날짜별: "오늘 · 11월 12일 (목)", 환자별: 환자 이름). 바뀌는 곳마다 제목 줄이 들어간다
+    patient: str = ""  # 환자 이름 (있으면 굵게 첫 줄에, 시각은 둘째 줄로)
 
     @property
     def text(self) -> str:
-        return " · ".join(part for part in (f"진료 #{self.session_id}", self.when, self.status, self.note) if part)
+        parts = (f"진료 #{self.session_id}", self.patient, self.when, self.status, self.note)
+        return " · ".join(part for part in parts if part)
 
 
 _ROW_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -276,19 +279,22 @@ class _HistoryDelegate(QStyledItemDelegate):
         left, right = badge.right() + 12, chip.left() - 12
         align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         title_font = _font(14, QFont.Weight.DemiBold)
-        if row.note:
+        # 환자 이름이 있으면 이름을 굵게 첫 줄에, 시각·의사는 둘째 줄에
+        heading = row.patient or row.when
+        detail = " · ".join(part for part in ((row.when if row.patient else ""), row.note) if part)
+        if detail:
             title = QRectF(left, rect.center().y() - 19, right - left, 20)
             note = QRectF(left, rect.center().y() + 1, right - left, 18)
             note_font = _font(12)
             painter.setFont(note_font)
             painter.setPen(QColor("#8b93a1"))
-            elided = QFontMetrics(note_font).elidedText(row.note, Qt.TextElideMode.ElideRight, int(note.width()))
+            elided = QFontMetrics(note_font).elidedText(detail, Qt.TextElideMode.ElideRight, int(note.width()))
             painter.drawText(note, align, elided)
         else:
             title = QRectF(left, rect.top(), right - left, rect.height())
         painter.setFont(title_font)
         painter.setPen(QColor("#e6e8ee"))
-        painter.drawText(title, align, QFontMetrics(title_font).elidedText(row.when, Qt.TextElideMode.ElideRight, int(title.width())))
+        painter.drawText(title, align, QFontMetrics(title_font).elidedText(heading, Qt.TextElideMode.ElideRight, int(title.width())))
         painter.restore()
 
 
@@ -302,6 +308,9 @@ class SimpleView(QWidget):
     update_clicked = Signal()
     history_selected = Signal(int)  # 진료 번호
     delete_requested = Signal(int)  # 지울 진료 번호 (-1: 지금 고른 진료)
+    patient_requested = Signal(int)  # 환자 이름을 적을 진료 번호 (-1: 지금 고른 진료)
+    search_changed = Signal(str)  # 진료 기록 검색어 (입력이 멈추면)
+    group_changed = Signal(str)  # 진료 기록 묶음: "day" 날짜별 / "patient" 환자별
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -472,6 +481,12 @@ class SimpleView(QWidget):
             self._tabs.addButton(button)
             header.addWidget(button)
         header.addStretch(1)
+        self.patient_btn = QPushButton("환자 이름")
+        self.patient_btn.setObjectName("ghost")
+        self.patient_btn.setToolTip("고른 진료에 환자 이름을 적습니다 (이 컴퓨터 에만 저장, 요약 요청에는 넣지 않음)")
+        self.patient_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.patient_btn.clicked.connect(lambda: self.patient_requested.emit(-1))
+        header.addWidget(self.patient_btn)
         self.delete_btn = QPushButton("삭제")
         self.delete_btn.setObjectName("danger")
         self.delete_btn.setToolTip("고른 진료 기록(녹음·전사문·요약)을 이 컴퓨터 에서 지웁니다")
@@ -490,7 +505,38 @@ class SimpleView(QWidget):
         divider.setFixedHeight(1)
         column.addWidget(divider)
 
-        # 진료 기록: 내용은 숨기고 번호·시간·상태만 보여 준다. 날짜가 바뀌는 곳에 날짜 제목 줄.
+        # 진료 기록 찾기·묶기: 환자 이름·날짜·의사·요약·대화 내용으로 찾고, 날짜별 또는 환자별로 묶는다
+        self.history_tools = QWidget()
+        tools = QHBoxLayout(self.history_tools)
+        tools.setContentsMargins(0, 2, 0, 2)
+        tools.setSpacing(4)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("환자 이름 · 날짜(11월 12일) · 내용으로 찾기")
+        self.search.setClearButtonEnabled(True)
+        # 눌렀을 때만 입력: 창을 열자마자 이 칸이 키를 가져가면 스페이스바로 녹음할 수 없다. Enter 를 누르거나 기록을 고르면 놓는다
+        self.search.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.search.returnPressed.connect(self.search.clearFocus)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(lambda: self.search_changed.emit(self.search.text().strip()))
+        self.search.textChanged.connect(lambda _text: self._search_timer.start())
+        tools.addWidget(self.search, 1)
+        self.group_day = QPushButton("날짜별")
+        self.group_patient = QPushButton("환자별")
+        self._groups = QButtonGroup(self)
+        self._groups.setExclusive(True)
+        for button, mode in ((self.group_day, "day"), (self.group_patient, "patient")):
+            button.setObjectName("tab")
+            button.setCheckable(True)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.toggled.connect(lambda checked, mode=mode: checked and self.group_changed.emit(mode))
+            self._groups.addButton(button)
+            tools.addWidget(button)
+        self.group_day.setChecked(True)
+        column.addWidget(self.history_tools)
+
+        # 진료 기록: 내용은 숨기고 환자 이름·시간·상태만 보여 준다. 묶음(날짜·환자)이 바뀌는 곳에 제목 줄.
         self.history = QListWidget()
         self.history.setItemDelegate(_HistoryDelegate(self.history))
         self.history.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -535,8 +581,18 @@ class SimpleView(QWidget):
         self.error.setText(message)
         self.error.show()
 
-    def set_history(self, rows: list[HistoryRow], selected_id: int | None) -> None:
-        """rows: 최신순. 바뀐 것이 없으면 목록을 다시 만들지 않고 고른 줄만 맞춘다 (기록이 많아도 가볍게)."""
+    def set_group(self, mode: str) -> None:
+        """묶음 단추를 맞춘다 (group_changed 를 내지 않는다)."""
+        button = self.group_patient if mode == "patient" else self.group_day
+        button.blockSignals(True)
+        button.setChecked(True)
+        button.blockSignals(False)
+
+    def set_history(self, rows: list[HistoryRow], selected_id: int | None, total: int | None = None) -> None:
+        """rows: 보일 순서대로. total: 찾는 중이면 전체 기록 수 (rows 는 찾은 것만).
+
+        바뀐 것이 없으면 목록을 다시 만들지 않고 고른 줄만 맞춘다 (기록이 많아도 가볍게).
+        """
         self.history.blockSignals(True)
         if tuple(rows) != self._history_rows:
             self._history_rows = tuple(rows)
@@ -564,7 +620,16 @@ class SimpleView(QWidget):
         else:
             self.history.setCurrentRow(-1)
         self.history.blockSignals(False)
-        self.history_tab.setText(f"진료 기록  {len(rows)}" if rows else "진료 기록")
+        searching = total is not None
+        count = total if searching else len(rows)
+        if searching:
+            self.history_tab.setText(f"진료 기록  {len(rows)}/{count}")  # 찾은 수 / 전체
+        else:
+            self.history_tab.setText(f"진료 기록  {count}" if count else "진료 기록")
+        self.empty.setText("찾는 진료 기록이 없습니다\n환자 이름 · 날짜(11월 12일, 오늘) · 요약이나 대화 속 낱말로 찾습니다"
+                           if searching else
+                           "아직 진료 기록이 없습니다\nSpace 를 눌러 녹음을 시작하면 진료가 여기에 쌓입니다")
+        self._has_records = count > 0
         self._show(self._panel)
 
     def history_items(self) -> list[QListWidgetItem]:
@@ -573,6 +638,7 @@ class SimpleView(QWidget):
         return [item for item in items if item.data(Qt.ItemDataRole.UserRole) is not None]
 
     def _on_history_clicked(self, item: QListWidgetItem) -> None:
+        self.search.clearFocus()  # 찾은 기록을 고르면 스페이스바가 다시 녹음을 맡는다
         session_id = item.data(Qt.ItemDataRole.UserRole)
         if session_id is not None:
             self.history_selected.emit(int(session_id))
@@ -583,16 +649,19 @@ class SimpleView(QWidget):
         if session_id is None:
             return
         menu = QMenu(self.history)
+        menu.addAction("환자 이름…").triggered.connect(lambda: self.patient_requested.emit(int(session_id)))
         menu.addAction(f"진료 #{session_id} 기록 삭제…").triggered.connect(lambda: self.delete_requested.emit(int(session_id)))
         menu.exec(self.history.viewport().mapToGlobal(pos))
         menu.deleteLater()
 
     # ---- 결과 (기본 숨김: 진료 기록 탭) ------------------------------------------
-    def set_results(self, has_transcript: bool, has_summary: bool, can_copy: bool, can_delete: bool = False) -> None:
+    def set_results(self, has_transcript: bool, has_summary: bool, can_copy: bool, can_delete: bool = False,
+                    can_name: bool = False) -> None:
         self.show_transcript_btn.setEnabled(has_transcript)
         self.show_summary_btn.setEnabled(has_summary)
         self.copy_btn.setEnabled(can_copy)
         self.delete_btn.setEnabled(can_delete)
+        self.patient_btn.setEnabled(can_name)
         if (self._panel == "summary" and not has_summary) or (self._panel == "transcript" and not has_transcript):
             self.history_tab.setChecked(True)
 
@@ -602,6 +671,7 @@ class SimpleView(QWidget):
     def _show(self, name: str) -> None:
         self._panel = name
         has_rows = self.history.count() > 0
+        self.history_tools.setVisible(name == "history" and getattr(self, "_has_records", False))
         self.history.setVisible(name == "history" and has_rows)
         self.empty.setVisible(name == "history" and not has_rows)
         self.summary_view.setVisible(name == "summary")

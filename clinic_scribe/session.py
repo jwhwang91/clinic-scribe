@@ -47,6 +47,7 @@ class Session:
     live_clips: list[LiveClip] = field(default_factory=list)
     exported: bool = False
     # 녹음 진료 정보
+    patient: str = ""  # 환자 이름 (지금은 직접 적고, 나중에는 씨차트에서). 이 컴퓨터 에만 두고 요약 요청에는 넣지 않는다
     offset_s: float = 0.0  # 연속 녹음 안에서 이 진료가 시작한 위치(초)
     duration_s: float = 0.0
     end_reason: str = ""  # 스페이스바 / 무음 90초 / 다음 환자 신호 '들어오세요' / 끝인사 '안녕히 가세요'

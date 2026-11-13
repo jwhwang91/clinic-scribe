@@ -224,6 +224,7 @@ class Settings:
     auto_summarize: bool = True
     summary_mode: str = "general"  # "general" 주요 내용 요약 / "chart" 진료 차트 초안
     view_mode: str = "simple"  # "simple" 간단 화면 / "developer" 개발자 대시보드
+    history_group: str = "day"  # 진료 기록 묶음: "day" 날짜별 / "patient" 환자별
     show_evidence: bool = True
     live_preview: bool = True  # 녹음 중 실시간 전사 미리보기 (whisper.cpp, 이 컴퓨터)
     # 자동 진료 나누기: 스페이스바로 끝내는 것을 깜빡했을 때의 대비책. 녹음은 이어지고 앞 진료만 따로 요약한다.

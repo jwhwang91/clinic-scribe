@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -67,6 +68,7 @@ from clinic_scribe.records import (
     RecordStore,
     Trimmed,
     apply_data,
+    record_matches,
     record_row,
     remap_result,
     session_data,
@@ -141,6 +143,11 @@ def _card(layout_type: type[QBoxLayout], margins: tuple[int, int, int, int] = (1
     layout = layout_type(card)
     layout.setContentsMargins(*margins)
     return card, layout
+
+
+def _name_key(name: str) -> str:
+    """환자 이름 비교용: 띄어쓰기를 뺀다 ('김 민준' = '김민준')."""
+    return "".join(name.split())
 
 
 def _mmss(seconds: float) -> str:
@@ -457,6 +464,11 @@ class MainWindow(QMainWindow):
         self.simple.developer_clicked.connect(lambda: self._set_view("developer"))
         self.simple.history_selected.connect(self._on_history_selected)
         self.simple.update_clicked.connect(self._open_updates)
+        self.simple.patient_requested.connect(self._edit_patient)
+        self.simple.search_changed.connect(self._on_history_search)
+        self.simple.group_changed.connect(self._on_history_group)
+        self._history_query = ""
+        self.simple.set_group(self.settings.history_group)
         # 자동 업데이트: 새 버전(테스트 통과)을 받아 두면 위쪽 막대에 '새 버전' 단추가 나온다
         self.updates = UpdateWatcher(self.settings, self)
         self.updates.changed.connect(self._refresh_update_chip)
@@ -798,6 +810,7 @@ class MainWindow(QMainWindow):
             has_summary=s is not None and not live_session and (s.draft is not None or bool(s.summary_note)),
             can_copy=s is not None and s.draft is not None,
             can_delete=s is not None and not live_session,
+            can_name=s is not None,
         )
         stale = s is not None and s.summary_stale and s.draft is not None and not s.summary_error
         # 전사가 실패했거나 전사 도중 앱이 꺼진 기록은 저장된 녹음으로 다시 전사한다
@@ -814,29 +827,103 @@ class MainWindow(QMainWindow):
         self._refresh_status_badge()
 
     def _refresh_history(self) -> None:
-        rows = [self._history_row(sess) for sess in reversed(self.sessions)]
-        self.simple.set_history(rows, self.session.session_id if self.session else None)
+        """진료 기록 목록: 최신순으로, 날짜별(기본) 또는 환자별(이름 가나다순, 이름 없는 진료는 끝)로 묶는다. 찾는 중이면 찾은 것만."""
+        by_patient = self.settings.history_group == "patient"
+        sessions = list(reversed(self.sessions))
+        found = self._search_ids(self._history_query) if self._history_query else None
+        if found is not None:
+            sessions = [sess for sess in sessions if sess.session_id in found]
+        groups: dict[str, str] = {}
+        if by_patient:  # 띄어쓰기만 다른 이름은 같은 환자로. 묶음 제목은 가장 최근에 적은 모양
+            sessions.sort(key=lambda sess: (not sess.patient, _name_key(sess.patient)))  # 같은 환자 안에서는 최신순 그대로
+            for sess in sessions:
+                groups.setdefault(_name_key(sess.patient), sess.patient or "이름 없는 진료")
+        rows = [self._history_row(sess, groups.get(_name_key(sess.patient))) for sess in sessions]
+        self.simple.set_history(rows, self.session.session_id if self.session else None,
+                                total=len(self.sessions) if found is not None else None)
 
-    def _history_row(self, sess: Session) -> HistoryRow:
+    def _session_doctor(self, sess: Session) -> str | None:
+        if sess.loaded:
+            return main_doctor(sess.runs[-1].result.segments) if sess.runs else None
+        return sess.stored_doctor
+
+    def _search_ids(self, query: str) -> set[int]:
+        """검색어의 낱말이 모두 맞는 진료: 환자·의사 이름, 날짜(11월 12일·11/12·오늘), 요약·대화 내용, 진료 번호(#12)."""
+        today = date.today()
+        found: set[int] | None = None
+        for term in query.split():
+            content: set[int] = set()
+            if self.store is not None:
+                try:
+                    content = self.store.search_ids(term)
+                except RecordError:
+                    pass
+            matched = set()
+            for sess in self.sessions:
+                text = ""
+                if sess.loaded and sess.session_id not in content:  # 아직 저장 전인 내용(방금 끝난 진료)
+                    text = "\n".join(seg.text for seg in sess.runs[-1].result.segments) if sess.runs else ""
+                if (sess.session_id in content or term.lower() in text.lower() or term == f"#{sess.session_id}"
+                        or record_matches(term, sess.patient, self._session_doctor(sess), sess.created_at, today)):
+                    matched.add(sess.session_id)
+            found = matched if found is None else found & matched
+        return found or set()
+
+    def _on_history_search(self, query: str) -> None:
+        self._history_query = query
+        self._refresh_history()
+
+    def _on_history_group(self, mode: str) -> None:
+        self.settings.history_group = mode
+        self._refresh_history()
+
+    def _edit_patient(self, session_id: int) -> None:
+        """진료에 환자 이름을 적는다 (-1: 지금 고른 진료). 이 컴퓨터 의 진료 기록에만 저장하고 요약 요청에는 넣지 않는다."""
+        sess = self.session if session_id < 0 else self._session_by_id(session_id)
+        if sess is None:
+            return
+        dialog = QInputDialog(self)
+        dialog.setStyleSheet(theme.stylesheet("QInputDialog"))
+        dialog.setWindowTitle("환자 이름")
+        dialog.setLabelText(f"진료 #{sess.session_id} ({sess.created_at.month}월 {sess.created_at.day}일 "
+                            f"{sess.created_at:%H:%M}) 환자 이름\n이 컴퓨터 의 진료 기록에만 저장합니다. 비우면 지웁니다.")
+        dialog.setTextValue(sess.patient)
+        if self.interactive and not dialog.exec():
+            return
+        self.set_patient(sess, dialog.textValue())
+
+    def set_patient(self, sess: Session, name: str) -> None:
+        sess.patient = " ".join(name.split())[:60]
+        if sess.loaded:
+            self._persist(sess)
+        else:
+            self.saver.set_patient(sess.session_id, sess.patient)  # 목록만 읽은 기록: 내용을 읽지 않고 이름만
+        self._refresh_history()
+
+    def _history_row(self, sess: Session, group: str | None = None) -> HistoryRow:
+        """group: 환자별로 묶을 때 묶음 제목(환자 이름). 그때는 줄에 이름 대신 날짜·시각을 쓴다."""
         start = sess.created_at.strftime("%H:%M")
-        day = day_label(sess.created_at.date(), date.today())
+        if group is not None:
+            day = group
+            on = f"{sess.created_at.month}월 {sess.created_at.day}일 "
+        else:
+            day = day_label(sess.created_at.date(), date.today())
+            on = ""
+        patient = "" if group is not None else sess.patient
         if sess is self._recording_session and self.recorder.active:
-            return HistoryRow(sess.session_id, f"{start} ~", "녹음 중", "recording", day=day)
+            return HistoryRow(sess.session_id, f"{on}{start} ~", "녹음 중", "recording", day=day, patient=patient)
         if sess.source.startswith("파일"):
-            when = f"{start} · {sess.source}"
+            when = f"{on}{start} · {sess.source}"
         elif sess.duration_s > 0:
             end = (sess.created_at + timedelta(seconds=sess.duration_s)).strftime("%H:%M")
-            when = f"{start}–{end} · {_mmss(sess.duration_s)}"
+            when = f"{on}{start}–{end} · {_mmss(sess.duration_s)}"
         else:
-            when = start
+            when = f"{on}{start}"
         status = self._session_status(sess)
-        if sess.loaded:
-            doctor = main_doctor(sess.runs[-1].result.segments) if sess.runs else None
-        else:
-            doctor = sess.stored_doctor
+        doctor = self._session_doctor(sess)
         reason = sess.end_reason if sess.end_reason and sess.end_reason != "직접 종료" else ""
         note = " · ".join(part for part in (f"의사 {doctor}" if doctor else "", reason) if part)
-        return HistoryRow(sess.session_id, when, status, HISTORY_KINDS.get(status, "warn"), note, day)
+        return HistoryRow(sess.session_id, when, status, HISTORY_KINDS.get(status, "warn"), note, day, patient)
 
     def _session_status(self, sess: Session) -> str:
         if not sess.loaded:
@@ -1071,6 +1158,8 @@ class MainWindow(QMainWindow):
             self._show_error("녹음 중인 진료는 지울 수 없습니다. 녹음을 끝내거나 취소한 뒤 지우세요.", warn=True)
             return
         when = f"{session.created_at.month}월 {session.created_at.day}일 {session.created_at:%H:%M}"
+        if session.patient:
+            when = f"{session.patient} · {when}"
         if not self._confirm_delete(f"진료 #{session.session_id} ({when}) 기록을 삭제할까요?",
                                     "녹음·전사문·요약이 이 컴퓨터 에서 지워지며 되돌릴 수 없습니다."):
             return

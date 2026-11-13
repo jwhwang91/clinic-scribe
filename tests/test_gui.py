@@ -1007,3 +1007,55 @@ def test_specialty_picks_reading_sentences_and_is_remembered(window, qapp, monke
     assert (name, specialty) == ("김원장", "피부과")
     assert prompts == build_prompts([], specialty="피부과") == list(SPECIALTY_PROMPTS["피부과"])
     dialog.reject()
+
+
+def test_history_patient_names_search_and_grouping(window, qapp):
+    """진료 기록: 환자 이름을 적으면 줄 첫머리에 보이고, 이름·날짜·내용으로 찾고, 환자별로 묶는다 (가상 진료)."""
+    from datetime import datetime, timedelta
+
+    from clinic_scribe.config import VadParams
+    from clinic_scribe.session import Session, TranscriptRun
+    from clinic_scribe.ui.simple_view import _ROW_ROLE
+    from clinic_scribe.whisper import TranscriptionResult, TranscriptSegment
+
+    def add(session_id, patient, text, days_ago):
+        sess = Session(session_id=session_id, source="마이크", duration_s=300,
+                       created_at=datetime.now() - timedelta(days=days_ago, minutes=10 - session_id % 10))
+        sess.runs = [TranscriptRun(1, TranscriptionResult([TranscriptSegment(0, 2, text)], None, True, VadParams(), 5.0, 0.1))]
+        window.sessions.append(sess)
+        window.set_patient(sess, patient)  # 저장도 한다
+
+    add(101, "김민준", "명치가 아프고 검은 변을 봤어요", 1)
+    add(102, "이서연", "기침이 나고 열은 없어요", 0)
+    add(103, "", "목이 따끔거려요", 0)
+    add(104, "김 민준", "속이 쓰려요", 0)
+    assert window.saver.flush()
+
+    def shown():
+        rows = [window.simple.history.item(i).data(_ROW_ROLE) for i in range(window.simple.history.count())]
+        return [row if isinstance(row, str) else row.session_id for row in rows]
+
+    window._refresh_history()
+    assert [r for r in shown() if isinstance(r, int)] == [104, 103, 102, 101]  # 최신순, 날짜별
+    first = window.simple.history_items()[0].data(_ROW_ROLE)
+    assert first.patient == "김 민준" and "김 민준" in first.text
+
+    def search(text, expected):
+        window.simple.search.setText(text)
+        assert wait_until(qapp, lambda: [r for r in shown() if isinstance(r, int)] == expected, 5), (text, shown())
+
+    search("김민준", [104, 101])  # 띄어쓰기 무시
+    search("명치", [101])  # 대화 내용
+    search("어제", [101])
+    search("기침 이서연", [102])  # 낱말이 모두 맞아야
+    search("#103", [103])
+    search("없는말", [])
+    assert "찾는 진료 기록이 없습니다" in window.simple.empty.text() and window.simple.history_tab.text() == "진료 기록  0/4"
+    search("", [104, 103, 102, 101])
+
+    window.simple.group_patient.click()
+    assert window.settings.history_group == "patient"
+    assert shown() == ["김 민준", 104, 101, "이서연", 102, "이름 없는 진료", 103]  # 가나다순, 같은 환자는 최신순
+    assert window.simple.history_items()[0].data(_ROW_ROLE).patient == ""  # 묶음 제목이 이름이니 줄에는 날짜·시각
+    window.simple.group_day.click()
+    assert window.settings.history_group == "day"

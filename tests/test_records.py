@@ -208,3 +208,57 @@ def test_rename_speaker_updates_saved_records(tmp_path):
     assert row.doctor == "김민수" and loaded.runs[0].result.doctor == "김민수"
     assert [seg.speaker for seg in loaded.runs[0].result.segments] == ["김민수", "김민수", None, None]
     assert store.rename_speaker("없는 이름", "아무개") == 0
+
+
+def test_patient_name_and_search_text_are_saved_and_found(tmp_path):
+    """환자 이름은 목록용 칸에, 요약·대화 내용은 검색용 글자로 저장하고 낱말로 찾는다 (가상 진료)."""
+    from clinic_scribe.records import record_matches
+
+    store = RecordStore(tmp_path / "records")
+    session = Session(session_id=7, source="마이크", created_at=datetime(2026, 11, 12, 10, 2))
+    session.runs = [TranscriptRun(1, make_result())]
+    session.draft = ConversationSummary(one_line="명치 통증으로 내원", key_points=[], action_items=[], needs_review=[])
+    session.patient = "김민준"
+    row = record_row(session, "요약 준비됨")
+    assert row["patient"] == "김민준" and "트리메부틴은 하루 세 번" in row["search_text"] and "명치 통증" in row["search_text"]
+    store.save(row, session_data(session))
+    assert store.search_ids("트리메부틴") == {7} and store.search_ids("명치") == {7} and store.search_ids("없는말") == set()
+    [listed] = store.load_index()
+    assert session_from_row(listed).patient == "김민준"
+    store.set_patient(7, "이서연")  # 목록만 읽은 기록의 이름 고치기
+    assert store.load_index()[0].patient == "이서연"
+
+    when, today = datetime(2026, 11, 12, 10, 2), datetime(2026, 11, 13).date()
+    for term in ("김민준", "민준", "김 민준", "11월12일", "11/12", "2026-11-12", "12일", "어제", "김원장"):
+        assert record_matches(term, "김민준", "김원장", when, today), term
+    for term in ("박지호", "11월13일", "오늘", "13일"):
+        assert not record_matches(term, "김민준", "김원장", when, today), term
+
+
+def test_version_1_records_get_patient_and_search_columns(tmp_path):
+    """옛 버전(1) 기록을 열면 환자 이름·검색용 글자 칸을 더하고, 저장된 요약·전사문으로 검색용 글자를 채운다."""
+    root = tmp_path / "records"
+    root.mkdir()
+    db = sqlite3.connect(root / "records.db")
+    db.executescript("""
+        CREATE TABLE records (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            source TEXT NOT NULL, duration_s REAL NOT NULL DEFAULT 0, end_reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '', doctor TEXT, pending TEXT NOT NULL DEFAULT '', audio TEXT,
+            audio_s REAL NOT NULL DEFAULT 0, audio_trimmed INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL DEFAULT '{}');
+        CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+        PRAGMA user_version = 1;
+    """)
+    old = Session(session_id=3, source="마이크", created_at=datetime(2026, 11, 11, 9, 0))
+    old.runs = [TranscriptRun(1, make_result())]
+    import json
+    db.execute("INSERT INTO records (id, created_at, updated_at, source, data) VALUES (3, ?, ?, '마이크', ?)",
+               (old.created_at.isoformat(), old.created_at.isoformat(), json.dumps(session_data(old), ensure_ascii=False)))
+    db.commit()
+    db.close()
+    store = RecordStore(root)
+    [listed] = store.load_index()
+    assert listed.patient == "" and store.search_ids("어디가 불편") == {3}
+    with sqlite3.connect(root / "records.db") as check:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 2
+    RecordStore(root)  # 다시 열어도 그대로
+    assert store.search_ids("어디가 불편") == {3}
