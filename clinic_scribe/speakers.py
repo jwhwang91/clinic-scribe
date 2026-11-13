@@ -30,6 +30,10 @@ MIN_TURN_S = 0.6  # 이보다 짧게 끼어든 말("네?")은 나누지 않는�
 TURN_SHIFT_WORDS = 2  # 나누는 자리를 앞뒤로 이만큼 낱말을 옮겨 보며 두 사람 목소리가 가장 뚜렷이 갈리는 곳을 고른다
 TURN_SENTENCE_BONUS = 0.1  # 목소리 차이가 이만큼(짧은 창의 흔들림 정도) 안이면 문장이 끝난 자리에서 나눈다 (짧은 첫 낱말·겹쳐 말한 곳)
 QUESTION_WORDS = 4  # 짧게 끼어든 질문: '?' 낱말과 그 앞 낱말 몇 개까지를 한 구간으로 비교해 본다
+# 목소리로 고른 나눌 자리가 문장 끝에서 이만큼 안이면 문장 끝에서 나눈다: 이보다 짧은 낱말(0.2초 "등")은 목소리로 누구 말인지
+# 가를 수 없고, Whisper 낱말 시각은 빌드(CPU)마다 0.2초쯤 다르다 (Windows: "아파서요. 등 / 어느 쪽이요?").
+# 문장을 끝낸 뒤 이어 한 말("그리고", 0.4초 넘음)은 그대로 둔다
+SENTENCE_SNAP_S = 0.4
 ENROLL_CHUNK_S = 4.0  # 등록 음성을 이 길이로 잘라 특징값을 평균한다
 MIN_ENROLL_S = 10.0  # 등록에 필요한 최소 말소리 길이
 
@@ -323,6 +327,10 @@ def split_turns(phrase: TranscriptSegment, pcm16: np.ndarray, encoder: SpeakerEn
             continue  # 비교할 자리가 없거나 너무 짧으면 비교가 흔들린다
         values = [contrast(cuts[i], size, a[2], b[2]) + TURN_SENTENCE_BONUS * ends_sentence(words[i].text) for i in options]
         best = options[int(np.argmax(values))]
+        if not ends_sentence(words[best].text):
+            near = [i for i in options if ends_sentence(words[i].text) and abs(cuts[i] - cuts[best]) <= SENTENCE_SNAP_S]
+            if near:
+                best = min(near, key=lambda i: abs(cuts[i] - cuts[best]))
         a[1], b[0] = best, best + 1
     merge_short()
 

@@ -135,6 +135,27 @@ def test_speech_only_drops_silence():
     assert len(speech_only(np.zeros(5 * SAMPLE_RATE, np.int16))) == 0  # 디지털 무음
 
 
+def test_split_turns_cuts_at_the_sentence_end_when_word_timing_is_off(tmp_path):
+    """Whisper 낱말 시각이 0.2초쯤 어긋난 경우(Windows CPU): 목소리로는 짧은 첫 낱말 '등'이 앞사람 쪽에 들어가도,
+    문장이 끝난 자리 0.4초 안이면 문장 끝에서 나눈다 ("아파서요. 등 / 어느 쪽이요?" 가 아니라 "/ 등 어느 쪽이요?")."""
+    book = VoiceBook(tmp_path / "v.json")
+    book.enroll("김원장", [axis(1)], seconds=20)
+    said = [("사흘", 0.5), ("전부터", 0.5), ("밥만", 0.5), ("먹으면", 0.5), ("속이", 0.5), ("쓰려요.", 0.5),  # 0.5~3.5
+            ("등", 0.3), ("어느", 0.5), ("쪽이요?", 0.5),  # 3.5~4.8: 낱말 시각은 3.5 부터인데 의사 목소리는 3.95 부터
+            ("오른쪽", 0.5), ("아래쪽", 0.5), ("이요.", 0.5)]
+    words, t = [], 0.5
+    for text, length in said:
+        words.append(TranscriptSegment(t, t + length, text, confidence=0.9))
+        t += length
+    pcm = np.zeros(int(8 * SAMPLE_RATE), np.int16)
+    for value, start, end in ((2, 0.5, 3.95), (1, 3.95, 4.8), (2, 4.8, t)):
+        pcm[int(start * SAMPLE_RATE) : int(end * SAMPLE_RATE)] = value
+    parts = split_turns(phrase_from_words(words, 0.5, t), pcm, MixEncoder(), book, 0.75)
+    assert [(p.speaker, p.text) for p in parts] == [
+        (PATIENT, "사흘 전부터 밥만 먹으면 속이 쓰려요."), ("김원장", "등 어느 쪽이요?"), (PATIENT, "오른쪽 아래쪽 이요."),
+    ]
+
+
 def test_split_turns_cuts_where_doctor_cuts_in_without_pause(tmp_path):
     """쉼 없이 끼어든 의사 질문: 말 덩어리 하나를 말한 사람이 바뀌는 낱말 경계에서 셋으로 나눈다."""
     book = VoiceBook(tmp_path / "v.json")
