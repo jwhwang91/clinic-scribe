@@ -2378,6 +2378,7 @@ class MainWindow(QMainWindow):
         """버튼으로 녹음한 진료의 요약이 끝났다: 클립보드에 복사하고, 씨차트 연결을 정했으면 진료 기록 칸 끝에 넣는다.
 
         녹음하는 동안 씨차트에서 읽은 환자와 지금 씨차트에 열린 환자가 같을 때만 넣고, 씨차트의 저장은 누르지 않는다.
+        넣기는 진료마다 처음 끝난 요약 한 번만 한다 (다시 요약하면 복사만: 같은 칸에 두 번 들어가지 않게).
         """
         if not session.via_hotkey or session.draft is None:
             return
@@ -2388,7 +2389,9 @@ class MainWindow(QMainWindow):
         name = session.patient or f"진료 #{session.session_id}"
         names = emr_link.usable_names(self.settings.emr_name_places)
         field = emr_link.usable_field(self.settings.emr_note_place)
-        if self.settings.emr_insert_summary and emr_link.supported() and names and field is not None:
+        if (self.settings.emr_insert_summary and emr_link.supported() and names and field is not None
+                and not session.emr_delivered):
+            session.emr_delivered = True
             expected = emr_link.agreed_name(session.emr_reads)
             if not expected:
                 reason = ("녹음하는 동안 씨차트 환자가 바뀌었습니다" if session.emr_reads

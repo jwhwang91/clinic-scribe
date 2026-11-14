@@ -57,6 +57,7 @@ class Session:
     # 이 실행 안에서만 쓰고 저장하지 않는다
     emr_reads: list[str] = field(default_factory=list)
     emr_rechecked: bool = False  # 20초 뒤 다시 읽기를 했다
+    emr_delivered: bool = False  # 요약을 씨차트에 넣으려 한 적이 있다 (다시 요약해도 또 넣지 않고 복사만 한다)
     transcribe_error: str | None = None
     transcribe_seconds: float = 0.0
     summary_seconds: float = 0.0

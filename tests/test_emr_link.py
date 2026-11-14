@@ -356,11 +356,13 @@ def test_record_button_reads_the_patient_and_puts_the_summary_into_seechart(wind
     names, field, text, expected = inserts[0]
     assert expected == "김 민준" and text.startswith("[검토용 초안]") and field == settings.emr_note_place
     assert window.overlay.text == "씨차트에 넣었습니다" and "저장하세요" in window.overlay.detail and cues[-1] == "done"
+    window._deliver_hotkey_summary(session)  # 같은 진료를 다시 요약했다: 또 넣지 않고 복사만 한다
+    assert len(inserts) == 1 and window.overlay.text == "요약을 복사했습니다"
 
-    window._deliver_hotkey_summary(session)  # 그 사이 씨차트에서 다른 환자를 열었다
+    window._deliver_hotkey_summary(finished("박지호", ["박지호"]))  # 그 사이 씨차트에서 다른 환자를 열었다
     assert wait_until(qapp, lambda: window.overlay.kind == "warn")
     assert "열린 환자가 다릅니다" in window.overlay.detail and "복사해 두었습니다" in window.overlay.detail
 
     settings.emr_insert_summary = False  # 넣기를 끄면 예전처럼 복사만 한다
-    window._deliver_hotkey_summary(session)
+    window._deliver_hotkey_summary(finished("최유나", ["최유나"]))
     assert len(inserts) == 2 and window.overlay.text == "요약을 복사했습니다"
