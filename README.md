@@ -674,4 +674,6 @@ scripts/  setup.py (OS 공통 설치) · setup_macos.sh · setup_linux.sh · set
 .github/workflows/tests.yml   Windows·Linux 에서 설치·전체 테스트·종료 점검, macOS 에서 설치·모델 없는 테스트
 .github/workflows/windows-desktop.yml  Windows 에서 씨차트 연결 점검·이름 읽기·요약 넣기(가짜 진료 차트 창)·녹음 버튼(키를 실제로 눌러 봄)
 tests/    단위·통합·GUI 테스트 (가짜 claude 실행 파일, 가짜 마이크 입력, 가짜 진료 차트 창 포함)
+CLAUDE.md        Claude Code 작업 지침: 지킬 것, 병원 PC 에서 작업할 때, 개발 명령, 배포 순서
+docs/WORKLOG.md  작업 기록: 현재 상태·다음 할 일·결정과 이유 (맥과 병원 PC 를 오가며 이어서 작업)
 ```
