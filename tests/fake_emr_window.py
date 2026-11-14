@@ -1,11 +1,16 @@
 """테스트용 가짜 진료 차트 창 (Windows): 씨차트 연결 점검이 다른 프로그램의 창에서 환자 이름을 찾는지 확인한다.
 
 python fake_emr_window.py <지금 환자> <대기 환자>...
-가상 환자 이름만 쓴다. 창 제목·환자명 칸·대기 목록에 이름이 보인다. 표준 입력으로 'show <이름>'을 받으면
-다른 환자를 연 것처럼 제목과 환자명 칸을 바꾸고 'shown', 'quit' 이면 창을 닫는다. 창이 뜨면 'ready'를 출력한다.
+가상 환자 이름만 쓴다. 창 제목·환자명 칸·대기 목록에 이름이 보이고, 여러 줄 '진료 기록' 칸이 있다. 표준 입력으로
+- 'show <이름>': 다른 환자를 연 것처럼 제목과 환자명 칸을 바꾸고 'shown'
+- 'note <글>': 진료 기록 칸의 글을 바꾸고 'noted' (\\n 은 줄바꿈)
+- 'dump': 진료 기록 칸의 글을 JSON 한 줄로 ({"note": ...})
+- 'quit': 창을 닫는다.
+창이 뜨면 'ready'를 출력한다.
 """
 
 import ctypes
+import json
 import sys
 import threading
 from ctypes import wintypes
@@ -36,6 +41,8 @@ user32.CreateWindowExW.restype = wintypes.HWND
 user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.SendMessageW.restype = LRESULT
 user32.SetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
+user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
 user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
@@ -46,6 +53,7 @@ kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
 WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_CHILD, WS_BORDER, WS_VSCROLL = 0x00CF0000, 0x10000000, 0x40000000, 0x00800000, 0x00200000
+ES_MULTILINE, ES_AUTOVSCROLL, ES_WANTRETURN = 0x0004, 0x0040, 0x1000
 WM_DESTROY, WM_CLOSE, LB_ADDSTRING = 0x0002, 0x0010, 0x0180
 
 
@@ -75,7 +83,7 @@ def main() -> None:
             raise ctypes.WinError(ctypes.get_last_error())
         return hwnd
 
-    main_window = create("FakeEmrMainWindow", title(patient), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 80, 80, 640, 420)
+    main_window = create("FakeEmrMainWindow", title(patient), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 80, 80, 640, 440)
     child = WS_CHILD | WS_VISIBLE
     create("STATIC", "환자명", child, 16, 16, 80, 24, main_window, 1001)
     name_edit = create("EDIT", patient, child | WS_BORDER, 100, 16, 160, 24, main_window, 1002)
@@ -84,6 +92,14 @@ def main() -> None:
     for name in waiting:
         buffer = ctypes.create_unicode_buffer(name)
         user32.SendMessageW(waiting_list, LB_ADDSTRING, 0, ctypes.addressof(buffer))
+    create("STATIC", "진료 기록", child, 16, 190, 80, 24, main_window, 1005)
+    note = create("EDIT", "", child | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+                  100, 190, 500, 180, main_window, 1006)
+
+    def note_text() -> str:
+        buffer = ctypes.create_unicode_buffer(user32.GetWindowTextLengthW(note) + 1)
+        user32.GetWindowTextW(note, buffer, len(buffer))
+        return buffer.value
 
     def listen() -> None:
         for raw in sys.stdin.buffer:
@@ -92,6 +108,11 @@ def main() -> None:
                 user32.SetWindowTextW(main_window, title(line[5:]))  # 창을 만든 스레드가 메시지로 바꾼다
                 user32.SetWindowTextW(name_edit, line[5:])
                 print("shown", flush=True)
+            elif line == "note" or line.startswith("note "):
+                user32.SetWindowTextW(note, line[5:].replace("\\n", "\r\n"))
+                print("noted", flush=True)
+            elif line == "dump":
+                print(json.dumps({"note": note_text()}, ensure_ascii=True), flush=True)
             elif line == "quit":
                 break
         user32.PostMessageW(main_window, WM_CLOSE, 0, 0)

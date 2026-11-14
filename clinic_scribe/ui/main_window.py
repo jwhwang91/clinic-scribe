@@ -5,6 +5,8 @@
 - 개발자 대시보드: 입력 파형, 진행 단계, 음성 구간 타임라인, 실시간/최종 전사, 음성 구간, VAD 비교, 요약.
 스페이스바로 녹음을 시작·종료한다. 녹음 버튼(전역 단축키, 기본 F13)은 씨차트 등 다른 프로그램이 앞에 있어도 녹음을 시작·종료하고,
 화면 구석의 작은 표시창과 소리로 알리며, 그렇게 녹음한 진료는 요약이 끝나면 클립보드에 복사한다.
+씨차트 연결을 정했으면(emr_link) 녹음할 때 씨차트에 열린 환자 이름을 진료 기록에 붙이고, 버튼으로 녹음한 진료의 요약은
+같은 환자일 때만 씨차트 진료 기록 칸 끝에 넣는다 (저장은 의사가 씨차트에서).
 녹음 중 긴 침묵이나 다음 환자 신호("들어오세요" 등)가 나오면
 그 진료를 끝내고 녹음은 이어서 다음 진료로 넘어간다(자동 진료 나누기). 진료마다 따로 전사·요약한다.
 진료 기록(무음을 줄인 녹음 · 전사문 · 요약)은 저장소(records.py)에 저장되어 앱을 다시 열어도 남고, 지울 수 있다.
@@ -54,7 +56,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from clinic_scribe import installer, mic_permission, procutil, updater
+from clinic_scribe import emr_link, installer, mic_permission, procutil, updater
 from clinic_scribe.hotkey import GlobalHotkey, HotkeyError, describe as describe_key
 from clinic_scribe.audio import WHISPER_SR, AudioFileError, load_audio_file, pcm_slice, rms_dbfs, to_mono, to_whisper_pcm
 from clinic_scribe.auto_split import find_cue, parse_cues
@@ -140,6 +142,7 @@ HISTORY_KINDS = {
 VIEW_SIZES = {"simple": (1040, 640), "developer": (1400, 900)}  # 화면을 바꿀 때 창 크기
 LIVE_PAD_S = 0.3  # 실시간 미리보기 클립 앞뒤 여유
 KEEP_AUDIO_SESSIONS = 5  # 녹음(16 kHz)을 메모리에 남겨 둘 최근 진료 수 (나머지는 필요할 때 저장소에서 다시 읽는다)
+EMR_RECHECK_S = 20  # 진료를 시작하고 이만큼 뒤에 씨차트 환자 이름을 한 번 더 읽는다 (그 사이 환자가 바뀌었는지)
 
 
 def _card(layout_type: type[QBoxLayout], margins: tuple[int, int, int, int] = (14, 12, 14, 12)) -> tuple[QFrame, QBoxLayout]:
@@ -199,6 +202,9 @@ class MainWindow(QMainWindow):
         self._live_issue: str | None = None
         self.tasks = TaskRunner(self)
         self.tasks.finished.connect(self._on_task_finished)
+        self.emr = TaskRunner(self)  # 씨차트 연결 (emr_link): 환자 이름 읽기 · 요약 넣기
+        self.emr.finished.connect(self._on_emr_finished)
+        self._emr_jobs: dict[Task, tuple[Session, bool]] = {}  # 작업 → (진료, 요약을 클립보드에도 복사했나)
         self._permission = _PermissionBridge(self)
         self._permission.result.connect(self._on_permission_result)
         # 진료 기록 저장소: 앱을 다시 열어도 기록이 남는다. 목록용 정보만 먼저 읽고 내용은 고를 때 읽는다.
@@ -1307,6 +1313,7 @@ class MainWindow(QMainWindow):
         self._clear_error()
         self._set_status("녹음 중", "recording")
         self._select_session(session)
+        self._read_emr_patient(session)
         self.tabs.setCurrentWidget(self.live_view)
         self._render_live()
         self._rec_timer.start()
@@ -1329,6 +1336,9 @@ class MainWindow(QMainWindow):
         total = self.recorder.elapsed
         rec = self._recording_session
         consult = total - (rec.offset_s if rec is not None else 0.0)
+        if rec is not None and not rec.emr_rechecked and consult >= EMR_RECHECK_S:
+            rec.emr_rechecked = True  # 자동으로 나뉜 진료는 이때 처음 읽는다 (다음 환자 차트를 열 시간)
+            self._read_emr_patient(rec)
         self.elapsed_label.setText(_mmss(consult))
         self.simple.elapsed.setText(_mmss(consult))
         self.timeline.set_data(
@@ -2040,7 +2050,7 @@ class MainWindow(QMainWindow):
             session.summary_stale = False
             if shown:
                 self._set_status(f"완료 · {draft.kind_label} 준비됨", "done")
-            self._copy_hotkey_summary(session)
+            self._deliver_hotkey_summary(session)
         if shown:
             self._show_draft()
 
@@ -2341,7 +2351,12 @@ class MainWindow(QMainWindow):
         overlay.set_allowed(QApplication.applicationState() != Qt.ApplicationState.ApplicationActive)
         if self.recorder.active and self._recording_started is not None:
             key = f"{self._hotkey_label()} 버튼을 다시 누르면 끝" if self._hotkey is not None else "Space 를 누르면 끝"
-            overlay.show_recording(self._recording_started, key)
+            rec = self._recording_session
+            overlay.show_recording(self._recording_started, f"{rec.patient} · {key}" if rec is not None and rec.patient else key)
+            return
+        inserting = next((sess for task, (sess, _copied) in self._emr_jobs.items() if task.job.kind == "emr_insert"), None)
+        if inserting is not None:
+            overlay.show_status("busy", "씨차트에 넣는 중…", inserting.patient or f"진료 #{inserting.session_id}")
             return
         sess = self._hotkey_session
         if sess is not None and self._session_by_id(sess.session_id) is sess:
@@ -2359,15 +2374,86 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def _copy_hotkey_summary(self, session: Session) -> None:
-        """버튼으로 녹음한 진료의 요약이 끝났다: 클립보드에 복사하고 표시창·소리로 알린다 (씨차트에서 Ctrl+V)."""
-        if not (session.via_hotkey and self.settings.auto_copy_summary and session.draft is not None):
+    def _deliver_hotkey_summary(self, session: Session) -> None:
+        """버튼으로 녹음한 진료의 요약이 끝났다: 클립보드에 복사하고, 씨차트 연결을 정했으면 진료 기록 칸 끝에 넣는다.
+
+        녹음하는 동안 씨차트에서 읽은 환자와 지금 씨차트에 열린 환자가 같을 때만 넣고, 씨차트의 저장은 누르지 않는다.
+        """
+        if not session.via_hotkey or session.draft is None:
             return
-        QGuiApplication.clipboard().setText(session.draft.to_text(include_evidence=self.evidence_check.isChecked()))
+        text = session.draft.to_text(include_evidence=self.evidence_check.isChecked())
+        copied = self.settings.auto_copy_summary
+        if copied:
+            QGuiApplication.clipboard().setText(text)
         name = session.patient or f"진료 #{session.session_id}"
-        self.overlay.show_status("done", "요약을 복사했습니다", f"{name} · 씨차트에서 Ctrl+V", 20)
+        names = emr_link.usable_names(self.settings.emr_name_places)
+        field = emr_link.usable_field(self.settings.emr_note_place)
+        if self.settings.emr_insert_summary and emr_link.supported() and names and field is not None:
+            expected = emr_link.agreed_name(session.emr_reads)
+            if not expected:
+                reason = ("녹음하는 동안 씨차트 환자가 바뀌었습니다" if session.emr_reads
+                          else "녹음할 때 씨차트에서 환자 이름을 읽지 못했습니다")
+                self._emr_not_inserted(session, copied, reason)
+                return
+            task = self.emr.start(Job("emr_insert", session.session_id, 0),
+                                  lambda cancel: emr_link.run_insert(names, field, text, expected, cancel))
+            self._emr_jobs[task] = (session, copied)
+            self._refresh_overlay()
+            return
+        if copied:
+            self.overlay.show_status("done", "요약을 복사했습니다", f"{name} · 씨차트에서 Ctrl+V", 20)
+            if self.settings.hotkey_sounds:
+                play_cue("done")
+
+    # -------------------------------------------------------------- 씨차트 연결 (emr_link)
+    def _read_emr_patient(self, session: Session) -> None:
+        """씨차트에 지금 열린 환자 이름을 읽어 이 진료에 붙인다 (씨차트 연결을 정했을 때. 따로 띄운 프로세스에서)."""
+        places = emr_link.usable_names(self.settings.emr_name_places) if emr_link.supported() else []
+        if places:
+            task = self.emr.start(Job("emr_read", session.session_id, 0), lambda cancel: emr_link.run_read(places, cancel))
+            self._emr_jobs[task] = (session, False)
+
+    def _on_emr_finished(self, task: Task, result, error) -> None:
+        job = self._emr_jobs.pop(task, None)
+        if job is None:  # 앱을 닫는 중
+            return
+        session, copied = job
+        if task.job.kind == "emr_read":
+            self._on_emr_read(session, result if error is None and isinstance(result, str) else "")
+        elif error is not None:
+            self._on_emr_inserted(session, copied, {"status": "error", "error": str(error)})
+        else:
+            self._on_emr_inserted(session, copied, result)
+
+    def _on_emr_read(self, session: Session, name: str) -> None:
+        if not name or self._session_by_id(session.session_id) is not session:
+            return
+        earlier = session.emr_reads[-1] if session.emr_reads else ""
+        session.emr_reads.append(name)
+        # 비어 있거나 앞서 씨차트에서 읽은 이름이면 새로 읽은 이름으로 (직접 적은 이름은 그대로 둔다)
+        if not session.patient or (earlier and emr_link.same_patient(session.patient, earlier)):
+            if not emr_link.same_patient(session.patient, name):
+                self.set_patient(session, name)
+        self._refresh_overlay()
+
+    def _on_emr_inserted(self, session: Session, copied: bool, result: dict) -> None:
+        if result.get("status") != "ok":
+            reason = emr_link.REASONS.get(result.get("status"), emr_link.REASONS["error"])
+            self._emr_not_inserted(session, copied, reason, result.get("error", ""))
+            return
+        name = session.patient or f"진료 #{session.session_id}"
+        self.overlay.show_status("done", "씨차트에 넣었습니다", f"{name} · 읽고 고친 뒤 씨차트에서 저장하세요", 30)
+        self._set_status(f"진료 #{session.session_id} 요약을 씨차트 진료 기록 칸에 넣었습니다 (저장은 씨차트에서)", "done")
         if self.settings.hotkey_sounds:
             play_cue("done")
+
+    def _emr_not_inserted(self, session: Session, copied: bool, reason: str, detail: str = "") -> None:
+        backup = "요약은 복사해 두었습니다 (Ctrl+V)" if copied else "요약은 clinic-scribe 에 있습니다"
+        self.overlay.show_status("warn", "씨차트에 넣지 않았습니다", f"{reason}\n{backup}", 30)
+        self._set_status(f"진료 #{session.session_id} 요약을 씨차트에 넣지 않았습니다: {reason}"
+                         + (f" ({detail})" if detail else ""), "warn")
+        if self.settings.hotkey_sounds:
+            play_cue("error")
 
     # -------------------------------------------------------------- 업데이트
     def _refresh_update_chip(self) -> None:
@@ -2439,6 +2525,7 @@ class MainWindow(QMainWindow):
         if self._hotkey is not None:
             self._hotkey.stop()
             self._hotkey = None
+        self._emr_jobs.clear()  # 씨차트 프로세스는 아래 terminate_all 이 끝낸다
         self.overlay.hide()
         self._rec_timer.stop()
         if self.recorder.active:

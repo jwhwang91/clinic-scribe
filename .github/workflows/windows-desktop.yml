@@ -1,5 +1,6 @@
 # Windows 데스크톱 기능을 실제 Windows 에서 빨리 확인한다 (전체 테스트 tests.yml 보다 훨씬 빨리 끝난다):
 # - 씨차트 연결 점검: 가짜 진료 차트 창을 다른 프로세스로 띄우고 가상 환자 이름을 찾는지, 다른 환자를 열면 같은 자리에서 찾는지
+# - 씨차트 연결: 그 자리에서 환자 이름을 읽고, 진료 기록 칸을 찾아 같은 환자일 때만 가상 요약을 끝에 덧붙이는지
 # - 녹음 버튼: 전역 단축키(F13)를 등록하고 키를 실제로 눌러 불리는지, 이미 쓰는 키를 알려 주는지
 name: windows-desktop
 
@@ -7,9 +8,11 @@ on:
   push:
     paths:
       - "clinic_scribe/emr_probe.py"
+      - "clinic_scribe/emr_link.py"
       - "clinic_scribe/hotkey.py"
       - "clinic_scribe/procutil.py"
       - "tests/test_emr_probe.py"
+      - "tests/test_emr_link.py"
       - "tests/test_hotkey.py"
       - "tests/fake_emr_window.py"
       - ".github/workflows/windows-desktop.yml"
@@ -17,7 +20,7 @@ on:
 
 jobs:
   windows:
-    name: 씨차트 연결 점검 · 녹음 버튼 (Windows)
+    name: 씨차트 연결 · 녹음 버튼 (Windows)
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -27,4 +30,4 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install pytest "comtypes>=1.4"
       # 화면 창 테스트(PySide6)는 건너뛰고, 화면 읽기·가리기·결과 파일과 단축키만 본다
-      - run: python -m pytest -v -rs tests/test_emr_probe.py tests/test_hotkey.py
+      - run: python -m pytest -v -rs tests/test_emr_probe.py tests/test_emr_link.py tests/test_hotkey.py

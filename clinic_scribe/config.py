@@ -243,6 +243,10 @@ class Settings:
     record_hotkey: str = "F13"  # USB 버튼·풋페달이 보내게 정한 키 (Qt 표기)
     hotkey_sounds: bool = True  # 버튼으로 시작·종료할 때 소리
     auto_copy_summary: bool = True  # 버튼으로 녹음한 진료는 요약이 끝나면 클립보드에 복사 (씨차트에서 Ctrl+V)
+    # 씨차트 연결(emr_link.py): '씨차트 연결 점검'에서 정한 자리. 화면 구조와 가린 글자만 두고 환자 이름은 두지 않는다
+    emr_name_places: list = field(default_factory=list)  # 환자 이름을 읽는 자리 (믿을 만한 곳부터)
+    emr_note_place: dict = field(default_factory=dict)  # 요약을 넣을 진료 기록 칸
+    emr_insert_summary: bool = True  # 버튼으로 녹음한 진료는 요약을 그 칸 끝에 넣는다 (같은 환자일 때만, 저장은 의사가)
     # GitHub 에 올라온 새 버전 중 테스트를 통과한 버전을 받아 두었다가 앱을 열 때 적용한다 (updater.py)
     auto_update: bool = True
 
@@ -293,6 +297,10 @@ class Settings:
             settings.summary_mode = "general"
         if settings.view_mode not in VIEW_MODES:
             settings.view_mode = "simple"
+        if not isinstance(settings.emr_name_places, list):
+            settings.emr_name_places = []
+        if not isinstance(settings.emr_note_place, dict):
+            settings.emr_note_place = {}
         return settings
 
     def save(self, path: Path | None = None) -> None:

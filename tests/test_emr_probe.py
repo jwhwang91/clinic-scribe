@@ -248,7 +248,7 @@ def test_dialog_checks_two_patients_and_saves_a_masked_report(qapp, tmp_path, mo
     assert wait_until(qapp, lambda: len(dialog.runs) == 3)
     shown = dialog.result.toPlainText() + dialog.verdict.text()
     assert dialog.pill.text() == "읽을 수 있음" and "같은 자리 2곳" in shown
-    assert [badge.text() for badge in dialog.badges] == ["✓", "✓", "✓"]
+    assert [badge.text() for badge in dialog.badges] == ["✓", "✓", "✓", "4"]  # 4: 진료 기록 칸 (test_emr_link)
     assert_nothing_private(shown + dialog.detail.text())
 
     target = tmp_path / "점검.txt"

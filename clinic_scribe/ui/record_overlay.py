@@ -1,4 +1,5 @@
-"""녹음 표시창: 씨차트를 보며 버튼으로 녹음할 때 화면 구석에 작게 떠서 지금 상태를 알린다 (녹음 중 · 요약 중 · 복사됨 · 오류).
+"""녹음 표시창: 씨차트를 보며 버튼으로 녹음할 때 화면 구석에 작게 떠서 지금 상태를 알린다
+(녹음 중 · 요약 중 · 복사됨 · 씨차트에 넣음 · 넣지 않음 · 오류).
 
 키보드 입력을 가져가지 않아 씨차트에 쓰던 글이 끊기지 않고, clinic-scribe 창을 보고 있을 때는 숨는다.
 누르면 clinic-scribe 창을 앞으로 가져온다. 화면을 보지 않아도 버튼이 눌렸는지 알도록 시작·끝 소리도 여기서 낸다.
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLayout, QVBoxLayout,
 
 from clinic_scribe.ui.theme import STATUS_COLORS
 
-_DOT = {"recording": "#fb7185", "busy": "#7aa2ff", "done": "#4ade80", "error": "#f87171"}
+_DOT = {"recording": "#fb7185", "busy": "#7aa2ff", "done": "#4ade80", "warn": "#fbbf24", "error": "#f87171"}
 _CUES = {"start": (660, 880), "stop": (880, 660), "done": (990,), "error": (196, 196)}  # 음 높이(Hz)
 
 
@@ -47,7 +48,7 @@ class RecordOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("누르면 clinic-scribe 창을 엽니다")
-        self.kind = ""  # "" 숨김 · recording · busy · done · error
+        self.kind = ""  # "" 숨김 · recording · busy · done · warn · error
         self.text = ""
         self.detail = ""
         self.allowed = True  # clinic-scribe 창을 보고 있으면 False (숨는다)

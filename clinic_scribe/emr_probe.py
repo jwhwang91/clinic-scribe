@@ -138,15 +138,20 @@ def mask(text: str, name_re: re.Pattern | None = None) -> str:
     return masked
 
 
-def mask_identifier(text: str, name_re: re.Pattern | None = None) -> str:
-    """프로그램 안의 이름(클래스·AutomationId): 영문은 남기고, 긴 숫자(차트번호 등)와 한글은 가린다."""
+def mask_identifier(text: str, name_re: re.Pattern | None = None, limit: int = 60) -> str:
+    """프로그램 안의 이름(클래스·AutomationId)·오류 글: 영문은 남기고, 긴 숫자(차트번호 등)와 한글은 가린다."""
     if not text:
         return ""
     if name_re is not None:
         text = name_re.sub(PLACEHOLDER, text)
     text = _LONG_DIGITS.sub(lambda m: "#" * len(m.group()), text)
     text = re.sub(r"[가-힣]+", lambda m: m.group() if _safe_hangul(m.group()) else "○" * len(m.group()), text)
-    return text[:60]
+    return text[:limit]
+
+
+def is_screen_word(text: str) -> bool:
+    """화면에서 흔히 쓰는 낱말인가 (환자명·접수 등: 사람 이름이 아니다)."""
+    return _safe_hangul(text)
 
 
 def looks_like_name(text: str) -> bool:
@@ -245,11 +250,12 @@ def add_window(result: dict, entry: dict, hits: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------- 판단 · 결과 파일
-def _location(hit: dict) -> tuple:
+def location_key(hit: dict) -> tuple:
+    """이름을 찾은 자리 (프로그램 · 창 종류 · 칸까지의 경로): 점검끼리 같은 자리인지 비교한다."""
     return hit["exe"].lower(), hit["window_class"], hit["kind"], json.dumps(hit["key"])
 
 
-def _found_runs(runs: list[dict]) -> list[dict]:
+def found_runs(runs: list[dict]) -> list[dict]:
     return [run for run in runs if not run.get("error") and run["hits"]]
 
 
@@ -258,11 +264,11 @@ def stable_locations(runs: list[dict]) -> list[dict]:
 
     못 찾은 점검(이름을 잘못 적었거나 다시 해 본 것)은 빼고 비교한다.
     """
-    found = _found_runs(runs)
+    found = found_runs(runs)
     if len(found) < 2:
         return []
-    common = set.intersection(*({_location(hit) for hit in run["hits"]} for run in found))
-    return [hit for hit in found[-1]["hits"] if _location(hit) in common]
+    common = set.intersection(*({location_key(hit) for hit in run["hits"]} for run in found))
+    return [hit for hit in found[-1]["hits"] if location_key(hit) in common]
 
 
 def _missing_reasons(run: dict) -> list[str]:
@@ -294,7 +300,7 @@ def verdict(runs: list[dict]) -> tuple[str, str]:
         return "done", (f"환자가 바뀌어도 같은 자리 {len(stable)}곳에서 이름이 읽힙니다. "
                         "이 자리에서 환자 이름을 가져와 진료 기록을 환자별로 나눌 수 있습니다.")
     if last["hits"]:
-        if len(_found_runs(runs)) >= 2:
+        if len(found_runs(runs)) >= 2:
             return "found", "이름은 찾았지만 두 환자의 이름이 나온 자리가 달랐습니다. 결과 파일을 보내 주시면 살펴보겠습니다."
         return "found", ("이름을 찾았습니다. 씨차트에서 다른 환자를 열고 그 이름으로 한 번 더 찾으면, "
                          "환자가 바뀔 때도 같은 자리에서 읽히는지 확인합니다.")
@@ -400,7 +406,7 @@ def format_report(runs: list[dict]) -> str:
         lines.append(f"  읽은 창 {len(scanned)}개 · 요소 {sum(w['elements'] for w in scanned):,}개"
                      + (" · 시간이 모자라 다 읽지 못함" if run.get("out_of_time") else ""))
         lines += [f"   - {describe_window(w)}" for w in run["windows"]]
-    found = _found_runs(runs)
+    found = found_runs(runs)
     if len(found) >= 2:
         stable = stable_locations(runs)
         lines += ["", f"■ 이름을 찾은 점검 {len(found)}번 모두 이름이 나온 같은 자리 {len(stable)}곳"]
@@ -621,7 +627,7 @@ class _Uia:
     def __init__(self) -> None:
         import comtypes.client
 
-        module = comtypes.client.GetModule("UIAutomationCore.dll")
+        self.module = module = comtypes.client.GetModule("UIAutomationCore.dll")
         self.automation = comtypes.client.CreateObject(module.CUIAutomation, interface=module.IUIAutomation)
         self.ids = {key: getattr(module, constant, value) for key, (constant, value) in _UIA_PROPERTIES.items()}
         self.cache = self.automation.CreateCacheRequest()
@@ -630,8 +636,33 @@ class _Uia:
         self.cache.TreeFilter = self.automation.RawViewCondition
         self.walker = self.automation.RawViewWalker
 
+    def cached(self, element, key: str):
+        try:
+            return element.GetCachedPropertyValue(self.ids[key])
+        except Exception:
+            return None
+
+    def identity(self, element) -> tuple[str, str, str]:
+        """(종류, 클래스, AutomationId): 경로 한 칸을 알아보는 값."""
+        control = CONTROL_TYPES.get(_as_int(self.cached(element, "control")), "Element")
+        return control, _as_str(self.cached(element, "class")), _as_str(self.cached(element, "id"))
+
+    def root(self, hwnd: int):
+        return self.automation.ElementFromHandleBuildCache(hwnd, self.cache)
+
+    def children(self, element, limit: int = MAX_CHILDREN) -> list:
+        kids: list = []
+        try:
+            child = self.walker.GetFirstChildElementBuildCache(element, self.cache)
+            while child and len(kids) < limit:
+                kids.append(child)
+                child = self.walker.GetNextSiblingElementBuildCache(child, self.cache)
+        except Exception:
+            pass
+        return kids
+
     def walk(self, hwnd: int, deadline: float, limit: int, win: _Win32) -> tuple[list[dict], bool]:
-        root = self.automation.ElementFromHandleBuildCache(hwnd, self.cache)
+        root = self.root(hwnd)
         nodes: list[dict] = []
         stopped = False
 
@@ -665,13 +696,9 @@ class _Uia:
 
     def _node(self, element, depth: int, index: int, parent_path: tuple, win: _Win32) -> dict:
         def get(key: str):
-            try:
-                return element.GetCachedPropertyValue(self.ids[key])
-            except Exception:
-                return None
+            return self.cached(element, key)
 
-        control = CONTROL_TYPES.get(_as_int(get("control")), "Element")
-        class_name, automation_id = _as_str(get("class")), _as_str(get("id"))
+        control, class_name, automation_id = self.identity(element)
         hwnd = _as_int(get("hwnd")) or 0
         texts = {"name": _as_str(get("name")), "value": _as_str(get("value")), "legacy": _as_str(get("legacy"))}
         if hwnd and depth > 0:
@@ -746,14 +773,22 @@ def scan(name: str, exclude_pids=(), budget_s: float = BUDGET_S) -> dict:
     return result
 
 
+REPO = Path(__file__).resolve().parent.parent
+
+
+def child_python() -> str:
+    """창을 읽는 프로세스를 띄울 Python. 결과를 표준 출력으로 받으려고 pythonw 대신 python 을 쓴다 (콘솔 창은 띄우지 않는다)."""
+    python = Path(sys.executable)
+    if python.name.lower() == "pythonw.exe" and python.with_name("python.exe").is_file():
+        python = python.with_name("python.exe")
+    return str(python)
+
+
 def run_probe(name: str, cancel: threading.Event | None = None, budget_s: float = BUDGET_S) -> dict:
     """따로 띄운 프로세스에서 scan 을 돌린다: 응답 없는 프로그램의 창을 읽다가 앱이 멈추지 않게."""
     request = json.dumps({"name": name, "exclude_pids": [os.getpid()], "budget_s": budget_s}).encode("ascii")
-    python = Path(sys.executable)
-    if python.name.lower() == "pythonw.exe" and python.with_name("python.exe").is_file():
-        python = python.with_name("python.exe")  # 결과를 표준 출력으로 받는다 (콘솔 창은 띄우지 않는다)
-    done = procutil.run([str(python), "-m", "clinic_scribe.emr_probe"], stdin_data=request,
-                        cwd=str(Path(__file__).resolve().parent.parent), timeout=budget_s + 60, cancel=cancel)
+    done = procutil.run([child_python(), "-m", "clinic_scribe.emr_probe"], stdin_data=request, cwd=str(REPO),
+                        timeout=budget_s + 60, cancel=cancel)
     try:
         return json.loads(done.stdout.decode("ascii"))
     except (ValueError, UnicodeDecodeError):

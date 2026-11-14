@@ -1,6 +1,8 @@
-"""씨차트 연결 점검 창: 씨차트에서 지금 보고 있는 환자 이름을 이 앱이 읽을 수 있는지 확인한다 (emr_probe).
+"""씨차트 연결 점검 창: 씨차트에서 지금 보고 있는 환자 이름을 이 앱이 읽을 수 있는지 확인하고 (emr_probe),
+요약을 넣을 진료 기록 칸을 정한다 (emr_link).
 
 환자 이름은 이 창의 입력칸과 메모리에만 있다. 화면의 결과와 결과 파일에는 '[환자 이름]'으로 가려 보여 준다.
+설정을 받으면 찾은 자리(화면 구조와 가린 글자만)를 바로 설정에 저장한다.
 """
 
 from __future__ import annotations
@@ -26,7 +28,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from clinic_scribe import emr_probe
+from clinic_scribe import emr_link, emr_probe
+from clinic_scribe.config import Settings
 from clinic_scribe.procutil import Cancelled
 from clinic_scribe.ui import theme
 from clinic_scribe.ui.tasks import Job, TaskRunner
@@ -36,6 +39,7 @@ STATUS = {"done": ("done", "읽을 수 있음"), "found": ("busy", "찾음"), "m
           "error": ("error", "점검 못 함")}
 CALLOUT = {"done": "ok", "found": "note", "missing": "warn", "error": "error"}
 SHOWN_HITS = 8
+FIELD_COLORS = {"ok": "#86efac", "warn": "#fdba74", "error": "#f87171", "idle": "#8b93a1"}
 
 
 class EmrProbeDialog(QDialog):
@@ -46,12 +50,17 @@ class EmrProbeDialog(QDialog):
 #stepText { font-size: 13px; color: #dfe3ea; }
 """
 
-    def __init__(self, parent=None, probe: Callable[[str, threading.Event], dict] | None = None) -> None:
+    def __init__(self, parent=None, probe: Callable[[str, threading.Event], dict] | None = None,
+                 settings: Settings | None = None, check: Callable[[dict, threading.Event], dict] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("씨차트 연결 점검")
-        self.setMinimumSize(700, 640)
+        self.setMinimumSize(700, 700)
+        self.settings = settings  # 찾은 자리를 저장할 설정 (없으면 점검만 한다)
         self.runs: list[dict] = []  # 점검 결과 (가린 글자만)
+        self.field_run: dict | None = None  # 진료 기록 칸 찾기 결과 (가린 글자만)
+        self._field_ok = False
         self._probe = probe or emr_probe.run_probe
+        self._check = check or emr_link.run_check
         self._seen: list[str] = []  # 앞에서 찾은 환자 이름: 같은 환자로 다시 찾지 않게 (메모리에만)
         self._pending = ""
         self._task = None
@@ -68,8 +77,8 @@ class EmrProbeDialog(QDialog):
         title = QLabel("씨차트 연결 점검")
         title.setObjectName("dialogTitle")
         outer.addWidget(title)
-        intro = QLabel("씨차트에서 지금 보고 있는 환자 이름을 이 앱이 읽을 수 있는지 확인합니다. "
-                       "씨차트에는 아무것도 입력하거나 누르지 않고, 화면의 글자를 읽기만 합니다.")
+        intro = QLabel("씨차트에서 지금 보고 있는 환자 이름을 이 앱이 읽을 수 있는지 확인하고, 요약을 넣을 진료 기록 칸을 "
+                       "정합니다. 점검하는 동안 이 앱은 씨차트에 아무것도 입력하거나 누르지 않고 화면의 글자를 읽기만 합니다.")
         intro.setObjectName("muted")
         intro.setWordWrap(True)
         outer.addWidget(intro)
@@ -103,6 +112,20 @@ class EmrProbeDialog(QDialog):
         steps_layout.addWidget(privacy)
         steps_layout.addLayout(self._step("씨차트에서 다른 환자를 열고, 그 이름으로 한 번 더 찾으세요. "
                                           "환자가 바뀌어도 같은 자리에서 읽히는지 확인합니다."))
+        marker = emr_link.MARKER
+        steps_layout.addLayout(self._step(f"요약을 넣을 씨차트 진료 기록 칸에 {marker} 를 적고 칸 찾기를 누르세요. "
+                                          f"찾은 뒤 {marker} 는 지워 주세요."))
+        field_row = QHBoxLayout()
+        field_row.setContentsMargins(32, 0, 0, 0)
+        field_row.setSpacing(12)
+        self.field_btn = QPushButton("칸 찾기")
+        self.field_btn.setMinimumWidth(110)
+        self.field_btn.clicked.connect(self._on_field_clicked)
+        field_row.addWidget(self.field_btn, 0, Qt.AlignmentFlag.AlignTop)
+        self.field_status = QLabel()
+        self.field_status.setWordWrap(True)
+        field_row.addWidget(self.field_status, 1, Qt.AlignmentFlag.AlignVCenter)
+        steps_layout.addLayout(field_row)
         outer.addWidget(steps)
 
         status_row = QHBoxLayout()
@@ -146,7 +169,7 @@ class EmrProbeDialog(QDialog):
         self.close_btn.clicked.connect(self.reject)
         bottom.addWidget(self.close_btn)
         outer.addLayout(bottom)
-        for button in (self.find_btn, self.save_btn, self.copy_btn, self.reset_btn, self.close_btn):
+        for button in (self.find_btn, self.field_btn, self.save_btn, self.copy_btn, self.reset_btn, self.close_btn):
             button.setAutoDefault(False)  # 이름 칸에서 Enter 는 찾기만 한다
         self._reset()
 
@@ -174,9 +197,13 @@ class EmrProbeDialog(QDialog):
     def _found(self) -> int:
         return sum(1 for run in self.runs if run["hits"])
 
+    def _set_field(self, kind: str, text: str) -> None:
+        self.field_status.setText(text)
+        self.field_status.setStyleSheet(f"color: {FIELD_COLORS[kind]}; font-size: 12px;")
+
     def _mark_steps(self) -> None:
         found = self._found()
-        done = (found >= 1, found >= 1, found >= 2)
+        done = (found >= 1, found >= 1, found >= 2, self._field_ok)
         for number, (badge, finished) in enumerate(zip(self.badges, done), 1):
             badge.setText("✓" if finished else str(number))
             badge.setProperty("done", finished)
@@ -184,11 +211,14 @@ class EmrProbeDialog(QDialog):
             badge.style().polish(badge)
 
     def _set_busy(self, busy: bool) -> None:
+        kind = self._task.job.kind if self._task is not None else ""
         self.name_edit.setEnabled(not busy)
-        self.find_btn.setText("멈추기" if busy else ("한 번 더 찾기" if self._found() else "찾기"))
-        for button in (self.save_btn, self.copy_btn):
-            button.setEnabled(not busy and bool(self.runs))
-        self.reset_btn.setEnabled(not busy and bool(self.runs))
+        self.find_btn.setText("멈추기" if kind == "emr_probe" else ("한 번 더 찾기" if self._found() else "찾기"))
+        self.find_btn.setEnabled(kind != "emr_field")
+        self.field_btn.setText("멈추기" if kind == "emr_field" else ("다시 찾기" if self.field_run else "칸 찾기"))
+        self.field_btn.setEnabled(kind != "emr_probe")
+        for button in (self.save_btn, self.copy_btn, self.reset_btn):
+            button.setEnabled(not busy and bool(self.runs or self.field_run))
         if busy:
             self._ticker.start()
             self._tick()
@@ -197,16 +227,26 @@ class EmrProbeDialog(QDialog):
 
     def _tick(self) -> None:
         seconds = time.monotonic() - self._started
-        self._set_status("busy", "읽는 중", f"열린 창의 글자를 읽고 있습니다… {seconds:.0f}초 (길어도 1분 남짓)")
+        what = "진료 기록 칸을 찾고" if self._task is not None and self._task.job.kind == "emr_field" else "열린 창의 글자를 읽고"
+        self._set_status("busy", "읽는 중", f"{what} 있습니다… {seconds:.0f}초 (길어도 1분 남짓)")
 
     def _reset(self) -> None:
         self.runs.clear()
         self._seen.clear()
+        self.field_run = None
         self.name_edit.clear()
         self.name_edit.setPlaceholderText("환자 이름 (예: 홍길동)")
         self.verdict.hide()
         self.result.setHtml('<p style="color:#6f7787">찾기를 누르면 이름을 찾은 곳이 여기에 나옵니다.</p>')
-        self._set_status("idle", "점검 전", "씨차트와 이 창을 함께 띄워 두고 시작하세요.")
+        detail = "씨차트와 이 창을 함께 띄워 두고 시작하세요."
+        names = emr_link.usable_names(self.settings.emr_name_places) if self.settings is not None else []
+        if names:
+            detail += " 환자 이름 자리는 이미 정해져 있습니다: 다시 점검하면 새로 찾은 자리로 바뀝니다."
+        self._set_status("idle", "점검 전", detail)
+        field = emr_link.usable_field(self.settings.emr_note_place) if self.settings is not None else None
+        self._field_ok = field is not None
+        self._set_field("idle", f"정해 둔 칸: {emr_link.describe_place(field)}. 다시 정하려면 칸 찾기를 누르세요."
+                        if field is not None else "")
         self._mark_steps()
         self._set_busy(False)
 
@@ -238,6 +278,9 @@ class EmrProbeDialog(QDialog):
             return
         self._task = None
         self._set_busy(False)
+        if task.job.kind == "emr_field":
+            self._on_field_found(result, error)
+            return
         if isinstance(error, Cancelled):
             self._set_status("idle", "멈춤", "점검을 멈췄습니다.")
             return
@@ -253,6 +296,16 @@ class EmrProbeDialog(QDialog):
 
     def _render(self) -> None:
         kind, message = emr_probe.verdict(self.runs)
+        if kind == "done" and self.settings is not None:
+            places = emr_link.name_places(self.runs)
+            if places:
+                self.settings.emr_name_places = places
+                self._save_settings()
+                message = (f"환자가 바뀌어도 같은 자리 {len(emr_probe.stable_locations(self.runs))}곳에서 이름이 읽힙니다. "
+                           "이 자리를 저장했습니다: 이제 녹음을 시작하면 씨차트에 열린 환자 이름을 진료 기록에 붙입니다.")
+            else:
+                kind, message = "found", ("환자가 바뀌어도 같은 자리에서 이름이 읽히지만, 그 자리의 글자 모양이 환자마다 달라 "
+                                          "이름만 떼어 낼 수 없었습니다. 결과 파일을 보내 주시면 살펴보겠습니다.")
         pill, label = STATUS[kind]
         last = self.runs[-1]
         scanned = sum(1 for w in last["windows"] if w["scanned"])
@@ -287,7 +340,67 @@ class EmrProbeDialog(QDialog):
                 parts.append(f"<p>읽은 프로그램: {esc(', '.join(programs) or '없음')}</p>")
         return "".join(parts)
 
+    # ---- 진료 기록 칸 ------------------------------------------------------------
+    def _on_field_clicked(self) -> None:
+        if self._task is not None:
+            self._task.cancel.set()
+            return
+        self._started = time.monotonic()
+        probe, check = self._probe, self._check
+
+        def work(cancel):
+            run = probe(emr_link.MARKER, cancel)
+            places = [] if run.get("error") else emr_link.field_places(run)
+            return run, places, check(places[0], cancel) if places else None
+
+        self._task = self._runner.start(Job("emr_field", 0, 0), work)
+        self._set_busy(True)
+
+    def _on_field_found(self, result, error) -> None:
+        marker = emr_link.MARKER
+        if isinstance(error, Cancelled):
+            self._set_status("idle", "멈춤", "칸 찾기를 멈췄습니다.")
+            return
+        if error is not None:
+            self._set_status("error", "점검 못 함", str(error))
+            return
+        run, places, checked = result
+        self.field_run = run
+        if run.get("error"):
+            self._set_field("error", run["error"])
+        elif not places:
+            self._set_field("warn", (f"{marker} 를 찾았지만 글자만 보이는 곳이었습니다. 진료 기록을 적는 칸에 적었는지 확인해 주세요."
+                                     if run["hits"] else
+                                     f"열린 창에서 {marker} 를 찾지 못했습니다. 씨차트 진료 기록 칸에 {marker} 를 적었는지 "
+                                     "확인하고 다시 찾아 주세요. 그래도 안 되면 결과 파일을 보내 주세요."))
+        elif checked["status"] != "ok":
+            reason = checked["error"] or emr_link.REASONS.get(checked["status"], checked["status"])
+            self._set_field("warn", f"{emr_link.describe_place(places[0])} 칸을 찾았지만 넣을 수 없습니다: {reason}")
+        else:
+            if self.settings is not None:
+                self.settings.emr_note_place = places[0]
+                self._save_settings()
+            self._field_ok = True
+            self._set_field("ok", f"✓ 진료 기록 칸을 정했습니다: {emr_link.describe_place(places[0])}. "
+                                  f"씨차트에 적은 {marker} 는 지워 주세요.")
+        found = not run.get("error") and bool(places) and checked["status"] == "ok"
+        scanned = sum(1 for w in run.get("windows", []) if w["scanned"])
+        self._set_status("done" if found else "warn", "칸 정함" if found else "칸 못 정함",
+                         f"{run.get('elapsed', 0):.0f}초 동안 창 {scanned}개를 읽었습니다.")
+        self._mark_steps()
+        self._set_busy(False)
+
+    def _save_settings(self) -> None:
+        try:
+            self.settings.save()
+        except OSError as exc:
+            self.detail.setText(f"설정을 저장하지 못했습니다: {exc}")
+
     # ---- 결과 파일 ------------------------------------------------------------
+    def _report(self) -> str:
+        report = emr_probe.format_report(self.runs) if self.runs else "clinic-scribe 씨차트 연결 점검 결과\n"
+        return report + emr_link.field_report(self.field_run)
+
     def _save(self) -> None:
         desktop = Path.home() / "Desktop"
         folder = desktop if desktop.is_dir() else Path.home()
@@ -296,14 +409,14 @@ class EmrProbeDialog(QDialog):
         if not path:
             return
         try:
-            Path(path).write_text(emr_probe.format_report(self.runs), encoding="utf-8-sig")  # 메모장에서도 한글이 보이게
+            Path(path).write_text(self._report(), encoding="utf-8-sig")  # 메모장에서도 한글이 보이게
         except OSError as exc:
             self.detail.setText(f"저장하지 못했습니다: {exc}")
             return
         self.detail.setText(f"결과를 저장했습니다: {path}")
 
     def _copy(self) -> None:
-        QApplication.clipboard().setText(emr_probe.format_report(self.runs))
+        QApplication.clipboard().setText(self._report())
         self.detail.setText("결과를 복사했습니다. 메일이나 메신저에 붙여 넣어 보내 주세요.")
 
     def done(self, result: int) -> None:
